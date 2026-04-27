@@ -13,7 +13,7 @@ import {
   isRalphPrdMode,
   normalizeRalphCliArgs,
 } from '../ralph.js';
-import type { ApprovedExecutionLaunchHint } from '../../planning/artifacts.js';
+import { CONTEXT_PACK_SCHEMA, type ApprovedExecutionLaunchHint } from '../../planning/artifacts.js';
 
 describe('extractRalphTaskDescription', () => {
   it('returns plain task text from positional args', () => {
@@ -78,7 +78,6 @@ describe('filterRalphCodexArgs', () => {
   });
 });
 
-
 const approvedHint: ApprovedExecutionLaunchHint = {
   mode: 'ralph',
   command: 'omx ralph "Execute approved issue 1072 plan"',
@@ -87,6 +86,38 @@ const approvedHint: ApprovedExecutionLaunchHint = {
   testSpecPaths: ['.omx/plans/test-spec-issue-1072.md'],
   deepInterviewSpecPaths: ['.omx/specs/deep-interview-issue-1072.md'],
 };
+
+describe('buildRalphAppendInstructions approved context pack', () => {
+  it('renders approved context pack entries as narrow first context', () => {
+    const instructions = buildRalphAppendInstructions('Execute approved issue 1072 plan', {
+      changedFilesPath: '.omx/ralph/changed-files.txt',
+      noDeslop: false,
+      approvedHint: {
+        ...approvedHint,
+        contextPack: {
+          path: '.omx/context/context-issue-1072.json',
+          pack: {
+            schema: CONTEXT_PACK_SCHEMA,
+            slug: 'issue-1072',
+            basis: {
+              prd: { path: '.omx/plans/prd-issue-1072.md', sha1: 'a'.repeat(40) },
+              testSpecs: [{ path: '.omx/plans/test-spec-issue-1072.md', sha1: 'b'.repeat(40) }],
+            },
+            entries: [
+              { path: 'src/planning/artifacts.ts', roles: ['build'], selector: { type: 'lines', start: 1, end: 120 } },
+              { path: 'src/planning/__tests__/artifacts.test.ts', roles: ['verify'] },
+            ],
+          },
+        },
+      },
+    });
+
+    assert.match(instructions, /context pack: \.omx\/context\/context-issue-1072\.json/);
+    assert.match(instructions, /first narrow execution context/);
+    assert.match(instructions, /\[build\] src\/planning\/artifacts\.ts:1-120/);
+    assert.match(instructions, /\[verify\] src\/planning\/__tests__\/artifacts\.test\.ts/);
+  });
+});
 
 describe('assertRequiredRalphPrdJson', () => {
   it('throws when --prd mode starts without .omx/prd.json', async () => {
@@ -211,8 +242,6 @@ describe('ralph deslop launch wiring', () => {
     assert.match(instructions, /skip the mandatory ai-slop-cleaner final pass/i);
     assert.match(instructions, /latest successful pre-deslop verification evidence/i);
   });
-
-
 
   it('includes approved plan and deep-interview handoff context when available', () => {
     const instructions = buildRalphAppendInstructions('Execute approved issue 1072 plan', {

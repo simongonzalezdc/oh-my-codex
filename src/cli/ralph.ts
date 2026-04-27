@@ -2,7 +2,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { startMode, updateModeState } from '../modes/base.js';
-import { readApprovedExecutionLaunchHint, type ApprovedExecutionLaunchHint } from '../planning/artifacts.js';
+import {
+  readApprovedContextPack,
+  readApprovedExecutionLaunchHint,
+  type ApprovedExecutionLaunchHint,
+  type ValidatedContextPack,
+} from '../planning/artifacts.js';
 import { ensureCanonicalRalphArtifacts } from '../ralph/persistence.js';
 import {
   buildFollowupStaffingPlan,
@@ -136,6 +141,18 @@ export function extractRalphTaskDescription(args: readonly string[], fallbackTas
   return words.join(' ') || fallbackTask || 'ralph-cli-launch';
 }
 
+function buildRalphContextPackLines(contextPack: ValidatedContextPack | null | undefined): string[] {
+  if (!contextPack) return [];
+  return [
+    `- context pack: ${contextPack.path}`,
+    '- Use the context pack entries below as the first narrow execution context; widen only when necessary.',
+    ...contextPack.pack.entries.map((entry) => {
+      const selector = entry.selector ? `:${entry.selector.start}-${entry.selector.end}` : '';
+      return `  - [${entry.roles.join(',')}] ${entry.path}${selector}`;
+    }),
+  ];
+}
+
 function buildRalphApprovedContextLines(approvedHint: ApprovedExecutionLaunchHint | null): string[] {
   if (!approvedHint) return [];
   const lines = [
@@ -149,6 +166,7 @@ function buildRalphApprovedContextLines(approvedHint: ApprovedExecutionLaunchHin
     lines.push(`- deep-interview specs: ${approvedHint.deepInterviewSpecPaths.join(', ')}`);
     lines.push('- Carry forward the approved deep-interview requirements and constraints during Ralph execution and final verification.');
   }
+  lines.push(...buildRalphContextPackLines(approvedHint.contextPack));
   return lines;
 }
 
@@ -257,6 +275,16 @@ export async function ralphCommand(args: string[]): Promise<void> {
   const artifacts = await ensureCanonicalRalphArtifacts(cwd);
   const approvedHint = readApprovedExecutionLaunchHint(cwd, 'ralph');
   const explicitTask = extractRalphTaskDescription(normalizedArgs);
+  const usesApprovedHandoffTask = approvedHint != null
+    && (explicitTask === 'ralph-cli-launch' || explicitTask.trim() === approvedHint.task.trim());
+  if (usesApprovedHandoffTask) {
+    const contextPackResult = readApprovedContextPack(cwd, approvedHint);
+    if (contextPackResult.status === 'valid') {
+      approvedHint.contextPack = contextPackResult.contextPack;
+    } else if (contextPackResult.status === 'stale' || contextPackResult.status === 'malformed') {
+      throw new Error(`[ralph] Invalid approved context pack at ${contextPackResult.path}: ${contextPackResult.errors.join('; ')}`);
+    }
+  }
   const task = explicitTask === 'ralph-cli-launch' ? approvedHint?.task ?? explicitTask : explicitTask;
   const noDeslop = normalizedArgs.some((arg) => arg.toLowerCase() === '--no-deslop');
   const availableAgentTypes = await resolveAvailableAgentTypes(cwd);
@@ -279,6 +307,8 @@ export async function ralphCommand(args: string[]): Promise<void> {
     approved_plan_path: approvedHint?.sourcePath,
     approved_test_spec_paths: approvedHint?.testSpecPaths ?? [],
     approved_deep_interview_spec_paths: approvedHint?.deepInterviewSpecPaths ?? [],
+    approved_context_pack_path: approvedHint?.contextPack?.path,
+    approved_context_pack_entries: approvedHint?.contextPack?.pack.entries ?? [],
     ...(artifacts.canonicalPrdPath ? { canonical_prd_path: artifacts.canonicalPrdPath } : {}),
   });
   if (artifacts.migratedPrd) {

@@ -4,7 +4,14 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isPlanningComplete, readApprovedExecutionLaunchHint, readPlanningArtifacts } from '../artifacts.js';
+import {
+  CONTEXT_PACK_SCHEMA,
+  createContextPackDraft,
+  isPlanningComplete,
+  readApprovedContextPack,
+  readApprovedExecutionLaunchHint,
+  readPlanningArtifacts,
+} from '../artifacts.js';
 
 let tempDir: string;
 
@@ -32,8 +39,6 @@ describe('planning artifacts', () => {
     assert.equal(artifacts.prdPaths.length, 1);
     assert.equal(artifacts.testSpecPaths.length, 0);
   });
-
-
 
   it('parses $ralph aliases with single-quoted task text for approved launch hints', async () => {
     const plansDir = join(tempDir, '.omx', 'plans');
@@ -145,8 +150,6 @@ describe('planning artifacts', () => {
     assert.deepEqual(hint?.deepInterviewSpecPaths, [join(specsDir, 'deep-interview-zeta.md')]);
   });
 
-
-
   it('binds approved handoff context to the selected PRD slug in multi-plan repos', async () => {
     const plansDir = join(tempDir, '.omx', 'plans');
     const specsDir = join(tempDir, '.omx', 'specs');
@@ -165,6 +168,103 @@ describe('planning artifacts', () => {
     assert.equal(hint?.sourcePath, join(plansDir, 'prd-zeta.md'));
     assert.deepEqual(hint?.testSpecPaths, [join(plansDir, 'test-spec-zeta.md')]);
     assert.deepEqual(hint?.deepInterviewSpecPaths, [join(specsDir, 'deep-interview-zeta.md')]);
+  });
+
+  it('validates a context pack with matching approved PRD/test-spec basis', async () => {
+    const plansDir = join(tempDir, '.omx', 'plans');
+    const contextDir = join(tempDir, '.omx', 'context');
+    await mkdir(plansDir, { recursive: true });
+    await mkdir(contextDir, { recursive: true });
+    const prdPath = join(plansDir, 'prd-issue-1970.md');
+    const testSpecPath = join(plansDir, 'test-spec-issue-1970.md');
+    await writeFile(prdPath, '# PRD\n\nLaunch via omx ralph "Execute issue 1970"\n');
+    await writeFile(testSpecPath, '# Test Spec\n');
+
+    const draft = createContextPackDraft(tempDir, [
+      { path: 'docs/context-packs.md', roles: ['scope'] },
+      { path: 'src/planning/artifacts.ts', roles: ['build'], selector: { type: 'lines', start: 1, end: 80 } },
+      { path: 'src/planning/__tests__/artifacts.test.ts', roles: ['verify'] },
+    ], { slug: 'issue-1970' });
+    assert.ok(draft);
+    await writeFile(join(contextDir, 'context-issue-1970.json'), JSON.stringify(draft, null, 2));
+
+    const hint = readApprovedExecutionLaunchHint(tempDir, 'ralph');
+    assert.ok(hint);
+    const result = readApprovedContextPack(tempDir, hint);
+    assert.equal(result.status, 'valid');
+    assert.equal(result.status === 'valid' ? result.contextPack.pack.schema : null, CONTEXT_PACK_SCHEMA);
+    assert.deepEqual(
+      result.status === 'valid' ? result.contextPack.pack.entries.map((entry) => entry.roles.join(',')) : [],
+      ['scope', 'build', 'verify'],
+    );
+  });
+
+  it('rejects context packs with stale approved PRD basis hashes', async () => {
+    const plansDir = join(tempDir, '.omx', 'plans');
+    const contextDir = join(tempDir, '.omx', 'context');
+    await mkdir(plansDir, { recursive: true });
+    await mkdir(contextDir, { recursive: true });
+    await writeFile(join(plansDir, 'prd-issue-1970.md'), '# PRD v1\n\nLaunch via omx ralph "Execute issue 1970"\n');
+    await writeFile(join(plansDir, 'test-spec-issue-1970.md'), '# Test Spec\n');
+    const draft = createContextPackDraft(tempDir, [
+      { path: 'src/planning/artifacts.ts', roles: ['build'] },
+    ], { slug: 'issue-1970' });
+    assert.ok(draft);
+    await writeFile(join(contextDir, 'context-issue-1970.json'), JSON.stringify(draft, null, 2));
+    await writeFile(join(plansDir, 'prd-issue-1970.md'), '# PRD v2\n\nLaunch via omx ralph "Execute issue 1970"\n');
+
+    const hint = readApprovedExecutionLaunchHint(tempDir, 'ralph');
+    assert.ok(hint);
+    const result = readApprovedContextPack(tempDir, hint);
+    assert.equal(result.status, 'stale');
+    assert.match(result.status === 'stale' ? result.errors.join('\n') : '', /basis\.prd/);
+  });
+
+  it('rejects malformed context pack entries and line selectors', async () => {
+    const plansDir = join(tempDir, '.omx', 'plans');
+    const contextDir = join(tempDir, '.omx', 'context');
+    await mkdir(plansDir, { recursive: true });
+    await mkdir(contextDir, { recursive: true });
+    await writeFile(join(plansDir, 'prd-issue-1970.md'), '# PRD\n\nLaunch via omx ralph "Execute issue 1970"\n');
+    await writeFile(join(plansDir, 'test-spec-issue-1970.md'), '# Test Spec\n');
+    const draft = createContextPackDraft(tempDir, [
+      { path: 'src/planning/artifacts.ts', roles: ['build'] },
+    ], { slug: 'issue-1970' });
+    assert.ok(draft);
+    await writeFile(join(contextDir, 'context-issue-1970.json'), JSON.stringify({
+      ...draft,
+      entries: [
+        { path: '', roles: ['scope'] },
+        { path: 'src/planning/artifacts.ts', roles: ['magic'] },
+        { path: 'src/cli/ralph.ts', roles: ['build'], selector: { type: 'lines', start: 10, end: 2 } },
+      ],
+    }, null, 2));
+
+    const hint = readApprovedExecutionLaunchHint(tempDir, 'ralph');
+    assert.ok(hint);
+    const result = readApprovedContextPack(tempDir, hint);
+    assert.equal(result.status, 'malformed');
+    const errors = result.status === 'malformed' ? result.errors.join('\n') : '';
+    assert.match(errors, /path must be a non-empty string/);
+    assert.match(errors, /invalid role/);
+    assert.match(errors, /start\/end/);
+  });
+
+  it('does not discover context packs without an approved handoff context', async () => {
+    const plansDir = join(tempDir, '.omx', 'plans');
+    const contextDir = join(tempDir, '.omx', 'context');
+    await mkdir(plansDir, { recursive: true });
+    await mkdir(contextDir, { recursive: true });
+    await writeFile(join(plansDir, 'prd-issue-1970.md'), '# PRD without launch hint\n');
+    await writeFile(join(plansDir, 'test-spec-issue-1970.md'), '# Test Spec\n');
+    const draft = createContextPackDraft(tempDir, [
+      { path: 'src/planning/artifacts.ts', roles: ['build'] },
+    ], { slug: 'issue-1970' });
+    assert.ok(draft);
+    await writeFile(join(contextDir, 'context-issue-1970.json'), JSON.stringify(draft, null, 2));
+
+    assert.equal(readApprovedExecutionLaunchHint(tempDir, 'ralph'), null);
+    assert.equal(readApprovedExecutionLaunchHint(tempDir, 'team'), null);
   });
 
   it('surfaces deep-interview specs for downstream traceability', async () => {

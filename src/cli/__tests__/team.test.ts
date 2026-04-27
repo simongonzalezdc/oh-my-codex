@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { buildLeaderMonitoringHints, parseTeamStartArgs, teamCommand } from '../team.js';
+import { createContextPackDraft } from '../../planning/artifacts.js';
 import { readModeState } from '../../modes/base.js';
 import { DEFAULT_MAX_WORKERS } from '../../team/state.js';
 import {
@@ -238,6 +239,69 @@ describe('parseTeamStartArgs', () => {
       const result = parseTeamStartArgs(['team으로', '해줘']);
       assert.equal(result.parsed.task, 'Execute approved issue 831 plan');
       assert.equal(result.parsed.workerCount, 3);
+    } finally {
+      process.chdir(previousCwd);
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('attaches a valid context pack only for approved short follow-up handoffs', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-team-followup-context-pack-'));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(wd);
+      await mkdir(join(wd, '.omx', 'plans'), { recursive: true });
+      await mkdir(join(wd, '.omx', 'context'), { recursive: true });
+      await writeFile(
+        join(wd, '.omx', 'plans', 'prd-issue-1970.md'),
+        '# Approved plan\n\nLaunch via omx team 3:executor "Execute approved issue 1970 plan"\n',
+      );
+      await writeFile(join(wd, '.omx', 'plans', 'test-spec-issue-1970.md'), '# Test spec\n');
+      const draft = createContextPackDraft(wd, [
+        { path: 'src/planning/artifacts.ts', roles: ['build'] },
+      ], { slug: 'issue-1970' });
+      assert.ok(draft);
+      await writeFile(join(wd, '.omx', 'context', 'context-issue-1970.json'), JSON.stringify(draft, null, 2));
+
+      const approvedFollowup = parseTeamStartArgs(['team']);
+      assert.equal(approvedFollowup.parsed.task, 'Execute approved issue 1970 plan');
+      assert.equal(approvedFollowup.parsed.contextPack?.pack.slug, 'issue-1970');
+
+      const normalTask = parseTeamStartArgs(['3:executor', 'implement', 'something', 'else']);
+      assert.equal(normalTask.parsed.contextPack, undefined);
+    } finally {
+      process.chdir(previousCwd);
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects stale context packs for approved short follow-up handoffs', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-team-followup-stale-context-pack-'));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(wd);
+      await mkdir(join(wd, '.omx', 'plans'), { recursive: true });
+      await mkdir(join(wd, '.omx', 'context'), { recursive: true });
+      await writeFile(
+        join(wd, '.omx', 'plans', 'prd-issue-1970.md'),
+        '# Approved plan v1\n\nLaunch via omx team 3:executor "Execute approved issue 1970 plan"\n',
+      );
+      await writeFile(join(wd, '.omx', 'plans', 'test-spec-issue-1970.md'), '# Test spec\n');
+      const draft = createContextPackDraft(wd, [
+        { path: 'src/planning/artifacts.ts', roles: ['build'] },
+      ], { slug: 'issue-1970' });
+      assert.ok(draft);
+      await writeFile(join(wd, '.omx', 'context', 'context-issue-1970.json'), JSON.stringify(draft, null, 2));
+      await writeFile(
+        join(wd, '.omx', 'plans', 'prd-issue-1970.md'),
+        '# Approved plan v2\n\nLaunch via omx team 3:executor "Execute approved issue 1970 plan"\n',
+      );
+
+      assert.throws(
+        () => parseTeamStartArgs(['team']),
+        /Invalid approved context pack.*basis\.prd/,
+      );
+      assert.doesNotThrow(() => parseTeamStartArgs(['3:executor', 'implement', 'something', 'else']));
     } finally {
       process.chdir(previousCwd);
       await rm(wd, { recursive: true, force: true });
@@ -1137,7 +1201,6 @@ describe('teamCommand api', () => {
     }
   });
 
-
   it('accepts new canonical event types via CLI api append-event', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-team-api-event-'));
     const previousCwd = process.cwd();
@@ -1179,7 +1242,6 @@ describe('teamCommand api', () => {
     }
   });
 });
-
 
 describe('teamCommand status', () => {
   it('prints pane ids and sparkshell hint when tmux panes are recorded', async () => {
@@ -1727,7 +1789,6 @@ describe('teamCommand status', () => {
       await rm(wd, { recursive: true, force: true });
     }
   });
-
 
   it('prints workspace_mode in text status output when present', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-team-status-workspace-mode-'));

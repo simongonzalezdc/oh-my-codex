@@ -9,7 +9,7 @@ import { readTeamEvents, waitForTeamEvent } from '../team/state/events.js';
 import type { TeamEvent } from '../team/state.js';
 import { parseWorktreeMode, type WorktreeMode } from '../team/worktree.js';
 import { classifyTaskSize } from '../hooks/task-size-detector.js';
-import { readApprovedExecutionLaunchHint } from '../planning/artifacts.js';
+import { readApprovedContextPack, readApprovedExecutionLaunchHint, type ValidatedContextPack } from '../planning/artifacts.js';
 import { routeTaskToRole } from '../team/role-router.js';
 import { allocateTasksToWorkers } from '../team/allocation-policy.js';
 import {
@@ -38,6 +38,7 @@ interface ParsedTeamArgs {
   explicitWorkerCount: boolean;
   task: string;
   teamName: string;
+  contextPack?: ValidatedContextPack;
 }
 
 
@@ -47,6 +48,7 @@ interface TeamFollowupContext {
   explicitWorkerCount: boolean;
   agentType?: string;
   explicitAgentType?: boolean;
+  contextPack?: ValidatedContextPack;
 }
 
 function persistExactTeamModeState(
@@ -74,6 +76,7 @@ function readPersistedTeamFollowupState(cwd: string): {
   agentType?: string;
   agent_types?: string;
   linkedRalph?: boolean;
+  contextPack?: ValidatedContextPack;
 } | null {
   const path = join(cwd, '.omx', 'state', 'team-state.json');
   if (!existsSync(path)) return null;
@@ -102,6 +105,13 @@ function resolveApprovedTeamFollowupContext(cwd: string, task: string): TeamFoll
 
   const approvedHint = readApprovedExecutionLaunchHint(cwd, 'team');
   if (!approvedHint) return null;
+  const contextPackResult = readApprovedContextPack(cwd, approvedHint);
+  let contextPack: ValidatedContextPack | undefined;
+  if (contextPackResult.status === 'valid') {
+    contextPack = contextPackResult.contextPack;
+  } else if (contextPackResult.status === 'stale' || contextPackResult.status === 'malformed') {
+    throw new Error(`[team] Invalid approved context pack at ${contextPackResult.path}: ${contextPackResult.errors.join('; ')}`);
+  }
 
   const persistedTask = typeof existingTeamState?.task_description === 'string'
     ? existingTeamState.task_description
@@ -120,6 +130,7 @@ function resolveApprovedTeamFollowupContext(cwd: string, task: string): TeamFoll
       explicitWorkerCount: true,
       agentType: approvedHint.agentType,
       explicitAgentType: approvedHint.agentType != null,
+      contextPack,
     };
   }
 
@@ -129,6 +140,7 @@ function resolveApprovedTeamFollowupContext(cwd: string, task: string): TeamFoll
     explicitWorkerCount: approvedHint.workerCount != null,
     agentType: approvedHint.agentType,
     explicitAgentType: approvedHint.agentType != null,
+    contextPack,
   };
 }
 
@@ -709,7 +721,15 @@ function parseTeamArgs(args: string[], cwd: string = process.cwd()): ParsedTeamA
   }
 
   const teamName = sanitizeTeamName(slugifyTask(effectiveTask));
-  return { workerCount, agentType, explicitAgentType, explicitWorkerCount, task: effectiveTask, teamName };
+  return {
+    workerCount,
+    agentType,
+    explicitAgentType,
+    explicitWorkerCount,
+    task: effectiveTask,
+    teamName,
+    ...(followupContext?.contextPack ? { contextPack: followupContext.contextPack } : {}),
+  };
 }
 
 export function parseTeamStartArgs(args: string[]): ParsedTeamStartArgs {
@@ -1020,6 +1040,8 @@ async function ensureTeamModeState(
       staffing_summary: staffingPlan.staffingSummary,
       staffing_allocations: staffingPlan.allocations,
       completed_at: completionStamp,
+      approved_context_pack_path: parsed.contextPack?.path,
+      approved_context_pack_entries: parsed.contextPack?.pack.entries ?? [],
     });
     return;
   }
@@ -1035,6 +1057,8 @@ async function ensureTeamModeState(
     staffing_summary: staffingPlan.staffingSummary,
     staffing_allocations: staffingPlan.allocations,
     completed_at: completionStamp,
+    approved_context_pack_path: parsed.contextPack?.path,
+    approved_context_pack_entries: parsed.contextPack?.pack.entries ?? [],
   });
 
 }
