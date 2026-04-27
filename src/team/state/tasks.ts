@@ -118,7 +118,8 @@ function extractDelegationComplianceEvidence(
   terminalData: { result?: string; error?: string } | undefined,
 ): TeamTaskDelegationComplianceEvidence | null {
   const plan = task.delegation;
-  if (!plan || plan.mode === 'none' || plan.mode === 'optional') return null;
+  if (!plan || plan.mode === 'none') return null;
+  if (plan.mode === 'optional' && plan.required_parallel_probe !== true) return null;
 
   const result = typeof terminalData?.result === 'string' ? terminalData.result : '';
   const spawnMatch = result.match(/^\s*Subagent spawn evidence:\s*(.+)$/im);
