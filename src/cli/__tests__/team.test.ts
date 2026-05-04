@@ -29,6 +29,12 @@ const OMX_CLI_PATH = fileURLToPath(new URL('../omx.js', import.meta.url));
 const ORIGINAL_OMX_TEAM_WORKER = process.env.OMX_TEAM_WORKER;
 const ORIGINAL_OMX_TEAM_STATE_ROOT = process.env.OMX_TEAM_STATE_ROOT;
 
+function encodeApprovedExecutionTask(task: string, quote: 'single' | 'double'): string {
+  return quote === 'single'
+    ? `'${task.replace(/'/g, "\\'")}'`
+    : `"${task.replace(/"/g, '\\"')}"`;
+}
+
 beforeEach(() => {
   delete process.env.OMX_TEAM_WORKER;
   delete process.env.OMX_TEAM_STATE_ROOT;
@@ -295,6 +301,82 @@ describe('parseTeamStartArgs', () => {
         sameFilePath(result.parsed.approvedExecution?.prd_path ?? '', boundPrdPath),
         true,
       );
+    } finally {
+      process.chdir(previousCwd);
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves escaped apostrophes while keeping other backslashes in persisted approved follow-ups', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-team-followup-bound-quoted-'));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(wd);
+      const plansDir = join(wd, '.omx', 'plans');
+      await mkdir(plansDir, { recursive: true });
+      const boundTask = "Fix Bob's regression in C:\\\\tmp";
+      const boundCommand = `omx team 2:executor ${encodeApprovedExecutionTask(boundTask, 'single')}`;
+      const boundPrdPath = join(plansDir, 'prd-issue-831-quoted.md');
+      await writeFile(
+        boundPrdPath,
+        `# Approved plan\n\nLaunch via ${boundCommand}\n`,
+      );
+      await writeFile(join(plansDir, 'test-spec-issue-831-quoted.md'), '# Test spec\n');
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await writeFile(
+        join(wd, '.omx', 'state', 'team-state.json'),
+        JSON.stringify({ active: true, team_name: 'bound-team-quoted' }, null, 2),
+      );
+      await writePersistedApprovedTeamExecutionBinding('bound-team-quoted', wd, {
+        prd_path: boundPrdPath,
+        task: boundTask,
+        command: boundCommand,
+      });
+
+      const result = parseTeamStartArgs(['team']);
+      assert.equal(result.parsed.task, boundTask);
+      assert.equal(result.parsed.workerCount, 2);
+      assert.equal(result.parsed.agentType, 'executor');
+      assert.equal(result.parsed.approvedExecution?.task, boundTask);
+      assert.equal(result.parsed.approvedExecution?.command, boundCommand);
+    } finally {
+      process.chdir(previousCwd);
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves literal backslashes in double-quoted persisted approved follow-ups', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-team-followup-bound-double-quoted-'));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(wd);
+      const plansDir = join(wd, '.omx', 'plans');
+      await mkdir(plansDir, { recursive: true });
+      const boundTask = String.raw`Use C:\tmp and keep \n literal plus "quotes"`;
+      const boundCommand = `omx team 2:executor ${encodeApprovedExecutionTask(boundTask, 'double')}`;
+      const boundPrdPath = join(plansDir, 'prd-issue-831-double-quoted.md');
+      await writeFile(
+        boundPrdPath,
+        `# Approved plan\n\nLaunch via ${boundCommand}\n`,
+      );
+      await writeFile(join(plansDir, 'test-spec-issue-831-double-quoted.md'), '# Test spec\n');
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await writeFile(
+        join(wd, '.omx', 'state', 'team-state.json'),
+        JSON.stringify({ active: true, team_name: 'bound-team-double-quoted' }, null, 2),
+      );
+      await writePersistedApprovedTeamExecutionBinding('bound-team-double-quoted', wd, {
+        prd_path: boundPrdPath,
+        task: boundTask,
+        command: boundCommand,
+      });
+
+      const result = parseTeamStartArgs(['team']);
+      assert.equal(result.parsed.task, boundTask);
+      assert.equal(result.parsed.workerCount, 2);
+      assert.equal(result.parsed.agentType, 'executor');
+      assert.equal(result.parsed.approvedExecution?.task, boundTask);
+      assert.equal(result.parsed.approvedExecution?.command, boundCommand);
     } finally {
       process.chdir(previousCwd);
       await rm(wd, { recursive: true, force: true });
