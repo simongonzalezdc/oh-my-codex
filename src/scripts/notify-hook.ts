@@ -82,6 +82,21 @@ const RALPH_ACTIVE_PROGRESS_PHASES = new Set([
 
 const IDLE_NOTIFICATION_SUMMARY_MAX_LENGTH = 240;
 
+async function isOmxManagedCwd(cwd: string): Promise<boolean> {
+  if (existsSync(join(cwd, '.omx', 'setup-scope.json'))) return true;
+  if (existsSync(join(cwd, '.omx', 'managed'))) return true;
+  const hooksPath = join(cwd, '.codex', 'hooks.json');
+  if (existsSync(hooksPath)) {
+    try {
+      const raw = await readFile(hooksPath, 'utf-8');
+      return /(?:^|[\\/])codex-native-hook\.js(?:["'\s]|$)/.test(raw);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 function summarizeIdleNotificationMessage(message: unknown): string {
   const source = safeString(message)
     .split('\n')
@@ -172,6 +187,9 @@ async function main() {
   }
 
   const cwd = payload.cwd || payload['cwd'] || process.cwd();
+  if (!(await isOmxManagedCwd(cwd))) {
+    process.exit(0);
+  }
   const payloadSessionId = safeString(payload.session_id || payload['session-id'] || '');
   const payloadThreadId = safeString(payload['thread-id'] || payload.thread_id || '');
   const inputMessages = normalizeInputMessages(payload);

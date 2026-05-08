@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseToml } from "@iarna/toml";
 import { setup } from "../setup.js";
+import { uninstall } from "../uninstall.js";
 
 const packageRoot = process.cwd();
 
@@ -70,6 +71,81 @@ async function withIsolatedUserHome<T>(
 		}
 	}
 }
+
+describe("notify setup scope", () => {
+	it("does not write unsupported project-scope notify", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-project-no-notify-"));
+		try {
+			await withTempCwd(wd, async () => {
+				await setup({ scope: "project" });
+			});
+			const config = await readFile(join(wd, ".codex", "config.toml"), "utf-8");
+			assert.doesNotMatch(config, /^notify\s*=/m);
+			assert.doesNotMatch(config, /notify-hook\.js/);
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("wraps and restores an existing user notify", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-user-notify-"));
+		try {
+			await withIsolatedUserHome(wd, async (codexHomeDir) => {
+				await mkdir(codexHomeDir, { recursive: true });
+				await writeFile(
+					join(codexHomeDir, "config.toml"),
+					'notify = ["node", "/tmp/user-notify.js"]\napproval_policy = "on-failure"\n',
+				);
+				await withTempCwd(wd, async () => {
+					await setup({ scope: "user" });
+				});
+
+				const config = await readFile(join(codexHomeDir, "config.toml"), "utf-8");
+				assert.match(
+					config,
+					/^notify = \["node", ".*notify-dispatcher\.js", "--metadata", ".*notify-dispatch\.json"\]$/m,
+				);
+				const metadataPath = join(
+					codexHomeDir,
+					".omx",
+					"notify-dispatch.json",
+				);
+				const metadata = JSON.parse(await readFile(metadataPath, "utf-8"));
+				assert.deepEqual(metadata.previousNotify, ["node", "/tmp/user-notify.js"]);
+				assert.deepEqual(metadata.omxNotify?.slice(0, 1), ["node"]);
+
+				await withTempCwd(wd, async () => {
+					await setup({ scope: "user" });
+				});
+				const rerunConfig = await readFile(
+					join(codexHomeDir, "config.toml"),
+					"utf-8",
+				);
+				assert.match(rerunConfig, /notify-dispatcher\.js/);
+				const rerunMetadata = JSON.parse(await readFile(metadataPath, "utf-8"));
+				assert.deepEqual(rerunMetadata.previousNotify, [
+					"node",
+					"/tmp/user-notify.js",
+				]);
+
+				await withTempCwd(wd, async () => {
+					await uninstall({ scope: "user" });
+				});
+				const restored = await readFile(
+					join(codexHomeDir, "config.toml"),
+					"utf-8",
+				);
+				assert.match(
+					restored,
+					new RegExp('^notify = \\["node", "/tmp/user-notify\\.js"\\]$', "m"),
+				);
+				assert.doesNotMatch(restored, /notify-dispatcher\.js/);
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+});
 
 async function assertProjectPluginModeArtifacts(wd: string): Promise<void> {
 	const hooks = await readFile(join(wd, ".codex", "hooks.json"), "utf-8");
@@ -1222,7 +1298,7 @@ describe("omx setup install mode behavior", () => {
 					assert.match(config, /^hooks = true$/m);
 					assert.doesNotMatch(
 						config,
-						/mcp_servers|notify|developer_instructions/,
+						/^\s*(?:notify|developer_instructions)\s*=|^\s*\[mcp_servers[.\]]/m,
 					);
 				});
 			});

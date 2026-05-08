@@ -4,8 +4,11 @@
 
 import { readFile, writeFile, readdir, rm } from "fs/promises";
 import { existsSync } from "fs";
-import { join, basename } from "path";
+import { join, basename, dirname } from "path";
 import {
+  formatTomlStringArray,
+  getRootTomlArray,
+  isOmxManagedNotifyCommand,
   stripExistingOmxBlocks,
   stripOmxEnvSettings,
   stripOmxTopLevelKeys,
@@ -97,6 +100,52 @@ function detectOmxConfigArtifacts(config: string): {
   };
 }
 
+function insertRootTomlKey(config: string, line: string): string {
+  const lines = config.split(/\r?\n/);
+  const firstTableIndex = lines.findIndex((candidate) =>
+    /^\s*\[/.test(candidate),
+  );
+  const insertAt = firstTableIndex >= 0 ? firstTableIndex : lines.length;
+  lines.splice(insertAt, 0, line);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+async function restorePreviousNotifyIfDispatcher(
+  configPath: string,
+  strippedConfig: string,
+  originalConfig: string,
+): Promise<string> {
+  const currentNotify = getRootTomlArray(originalConfig, "notify");
+  if (
+    !isOmxManagedNotifyCommand(currentNotify) ||
+    !currentNotify?.some((part) =>
+      /(?:^|[\\/])notify-dispatcher\.js$/.test(part),
+    )
+  ) {
+    return strippedConfig;
+  }
+
+  const metadataPath = join(dirname(configPath), ".omx", "notify-dispatch.json");
+  try {
+    const metadata = JSON.parse(await readFile(metadataPath, "utf-8")) as {
+      previousNotify?: unknown;
+    };
+    const previousNotify = metadata.previousNotify;
+    if (
+      Array.isArray(previousNotify) &&
+      previousNotify.every((item) => typeof item === "string")
+    ) {
+      return insertRootTomlKey(
+        strippedConfig,
+        `notify = ${formatTomlStringArray(previousNotify)}`,
+      );
+    }
+  } catch {
+    // Missing or malformed metadata means uninstall falls back to removing OMX notify.
+  }
+  return strippedConfig;
+}
+
 async function cleanConfig(
   configPath: string,
   options: Pick<UninstallOptions, "dryRun" | "verbose">,
@@ -139,8 +188,10 @@ async function cleanConfig(
   const { cleaned } = stripExistingOmxBlocks(config);
   config = cleaned;
 
-  // Strip top-level keys
+  // Strip OMX top-level keys, then restore a pre-existing user notify when
+  // setup had wrapped it in the OMX dispatcher.
   config = stripOmxTopLevelKeys(config);
+  config = await restorePreviousNotifyIfDispatcher(configPath, config, original);
 
   // Strip OMX-seeded behavioral defaults only when the seeded pair is unchanged.
   config = stripOmxSeededBehavioralDefaults(config);

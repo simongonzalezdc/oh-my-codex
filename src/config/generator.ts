@@ -30,6 +30,7 @@ interface MergeOptions {
   verbose?: boolean;
   statusLinePreset?: HudPreset;
   forceStatusLinePreset?: boolean;
+  notifyCommand?: string[] | false;
 }
 
 function escapeTomlString(value: string): string {
@@ -261,18 +262,55 @@ function parseRootKeyValues(config: string): Map<string, string> {
   return values;
 }
 
+function getDefaultNotifyCommand(pkgRoot: string): string[] {
+  return ["node", join(pkgRoot, "dist", "scripts", "notify-hook.js")];
+}
+
+export function formatTomlStringArray(values: readonly string[]): string {
+  return `[${values.map((value) => `"${escapeTomlString(value)}"`).join(", ")}]`;
+}
+
+export function getRootTomlArray(config: string, key: string): string[] | null {
+  const raw = parseRootKeyValues(config).get(key);
+  if (!raw) return null;
+  try {
+    const parsed = TOML.parse(`${key} = ${raw}`) as Record<string, unknown>;
+    const value = parsed[key];
+    if (
+      !Array.isArray(value) ||
+      !value.every((item) => typeof item === "string")
+    ) {
+      return null;
+    }
+    return value as string[];
+  } catch {
+    return null;
+  }
+}
+
+export function isOmxManagedNotifyCommand(
+  command: readonly string[] | null | undefined,
+): boolean {
+  if (!command) return false;
+  return (
+    command.some((part) => /(?:^|[\\/])notify-hook\.js$/.test(part)) ||
+    command.some((part) => /(?:^|[\\/])notify-dispatcher\.js$/.test(part))
+  );
+}
+
 function getOmxTopLevelLines(
   pkgRoot: string,
   existingConfig = "",
   modelOverride?: string,
+  notifyCommand: string[] | false = getDefaultNotifyCommand(pkgRoot),
 ): string[] {
-  const notifyHookPath = join(pkgRoot, "dist", "scripts", "notify-hook.js");
-  const escapedPath = escapeTomlString(notifyHookPath);
   const rootValues = parseRootKeyValues(existingConfig);
 
   const lines = [
     "# oh-my-codex top-level settings (must be before any [table])",
-    `notify = ["node", "${escapedPath}"]`,
+    ...(notifyCommand === false
+      ? []
+      : [`notify = ${formatTomlStringArray(notifyCommand)}`]),
     'model_reasoning_effort = "medium"',
     `developer_instructions = "${escapeTomlString(OMX_DEVELOPER_INSTRUCTIONS)}"`,
   ];
@@ -1523,6 +1561,9 @@ export function buildMergedConfig(
     pkgRoot,
     existing,
     options.modelOverride,
+    options.notifyCommand === undefined
+      ? getDefaultNotifyCommand(pkgRoot)
+      : options.notifyCommand,
   );
   const tablesBlock = getOmxTablesBlock(
     pkgRoot,
