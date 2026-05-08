@@ -65,6 +65,7 @@ import {
   maybeNotifyLeaderWorkerIdle,
 } from './notify-hook/team-worker.js';
 import { DEFAULT_MARKER } from './tmux-hook-engine.js';
+import { sameFilePath } from '../utils/paths.js';
 
 const RALPH_ACTIVE_PROGRESS_PHASES = new Set([
   'start',
@@ -83,6 +84,8 @@ const RALPH_ACTIVE_PROGRESS_PHASES = new Set([
 const IDLE_NOTIFICATION_SUMMARY_MAX_LENGTH = 240;
 
 async function isOmxManagedCwd(cwd: string): Promise<boolean> {
+  const trustedInternalCwd = safeString(process.env.OMX_NOTIFY_HOOK_TRUSTED_MANAGED_CWD || '').trim();
+  if (trustedInternalCwd && sameFilePath(trustedInternalCwd, cwd)) return true;
   if (existsSync(join(cwd, '.omx', 'setup-scope.json'))) return true;
   if (existsSync(join(cwd, '.omx', 'managed'))) return true;
   const hooksPath = join(cwd, '.codex', 'hooks.json');

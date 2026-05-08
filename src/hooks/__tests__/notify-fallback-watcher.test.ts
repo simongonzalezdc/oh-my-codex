@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import { once } from 'node:events';
 import assert from 'node:assert/strict';
 import { appendFile, chmod, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
@@ -11,6 +11,30 @@ import { buildTmuxSessionName, buildWindowsMsysBackgroundHelperBootstrapScript }
 import { writeSessionStart } from '../session.js';
 
 const DEFAULT_AUTO_NUDGE_RESPONSE = 'continue with the current task only if it is already authorized';
+const INHERITED_OMX_ENV_KEYS = [
+  'OMX_ROOT',
+  'OMX_STATE_ROOT',
+  'OMX_SESSION_ID',
+  'OMX_SOURCE_CWD',
+  'OMX_STARTUP_CWD',
+  'OMX_ENTRY_PATH',
+] as const;
+const inheritedOmxEnv = new Map<string, string | undefined>();
+
+before(() => {
+  for (const key of INHERITED_OMX_ENV_KEYS) {
+    inheritedOmxEnv.set(key, process.env[key]);
+    delete process.env[key];
+  }
+});
+
+after(() => {
+  for (const key of INHERITED_OMX_ENV_KEYS) {
+    const value = inheritedOmxEnv.get(key);
+    if (typeof value === 'string') process.env[key] = value;
+    else delete process.env[key];
+  }
+});
 
 async function appendLine(path: string, line: object): Promise<void> {
   const prev = await readFile(path, 'utf-8');
@@ -385,6 +409,10 @@ function buildCleanNotifyEnv(
     OMX_TEAM_STATE_ROOT: '',
     OMX_TEAM_LEADER_CWD: '',
     OMX_MODEL_INSTRUCTIONS_FILE: '',
+    OMX_ROOT: '',
+    OMX_STATE_ROOT: '',
+    OMX_SOURCE_CWD: '',
+    OMX_STARTUP_CWD: '',
     TMUX: '',
     TMUX_PANE: '',
     ...overrides,

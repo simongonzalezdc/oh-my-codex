@@ -1649,8 +1649,12 @@ async function invokeNotifyHook(payload: Record<string, unknown>, filePath: stri
   const result = spawnSync(process.execPath, [notifyScript, JSON.stringify(payload)], {
     cwd,
     encoding: 'utf-8',
-      windowsHide: true,
-    });
+    env: {
+      ...process.env,
+      OMX_NOTIFY_HOOK_TRUSTED_MANAGED_CWD: cwd,
+    },
+    windowsHide: true,
+  });
   const ok = result.status === 0;
   await eventLog({
     type: 'fallback_notify',
