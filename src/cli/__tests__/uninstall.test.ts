@@ -344,7 +344,10 @@ describe('omx uninstall', () => {
       const home = join(wd, 'home');
       const codexDir = join(home, '.codex');
       await mkdir(codexDir, { recursive: true });
-      await writeFile(join(codexDir, 'config.toml'), buildOmxConfig());
+      await writeFile(
+        join(codexDir, 'config.toml'),
+        buildOmxConfig().replace(/^hooks = true$/m, 'codex_hooks = true'),
+      );
       await writeFile(
         join(codexDir, 'hooks.json'),
         JSON.stringify(
@@ -377,7 +380,16 @@ describe('omx uninstall', () => {
       assert.doesNotMatch(hooks, /codex-native-hook\.js/);
 
       const config = await readFile(join(codexDir, 'config.toml'), 'utf-8');
-      assert.match(config, /^hooks = true$/m);
+      assert.match(
+        config,
+        /^hooks = true$/m,
+        'preserved user hooks should keep the canonical Codex hooks feature enabled',
+      );
+      assert.doesNotMatch(
+        config,
+        /^codex_hooks\s*=/m,
+        'legacy Codex hook aliases should be normalized during uninstall preservation',
+      );
       assert.doesNotMatch(config, /^multi_agent\s*=/m);
       assert.doesNotMatch(config, /^child_agents_md\s*=/m);
       assert.doesNotMatch(config, /^goals\s*=/m);
