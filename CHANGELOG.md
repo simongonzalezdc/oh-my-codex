@@ -14,7 +14,7 @@ Patch release focused on post-`0.16.2` native-hook/setup/runtime hardening: supp
 
 ### Changed
 
-- **Codex hook setup uses the supported feature flag** — generated setup/runtime config now emits `[features].codex_hooks = true` and migrates unsupported feature-table aliases back to the supported key.
+- **Codex hook setup uses the supported feature flag** — generated setup/runtime config now emits `[features].hooks = true` and migrates unsupported feature-table aliases back to the supported key.
 - **Runtime state and planning reads are more local by default** — Team startup evidence, planning artifacts, and delivery logs avoid global OMX state contamination unless an explicit Team state root is configured.
 
 ### Fixed
@@ -49,7 +49,7 @@ Post-`0.16.1` release-train correction and workflow hardening: aggregate `$ultra
 ### Fixed
 
 - **Stateful workflow session isolation** — session-scoped workflow state no longer inherits or autocompletes from root/global workflow entries; explicit `all_sessions` clears remain the global cleanup path.
-- **Codex hook feature-flag regression** — release review restored generated config to `[features].codex_hooks = true`, repairs stale/unreleased `[features].hooks = true` aliases, and updates setup/docs/tests/plugin mirrors accordingly.
+- **Codex hook feature-flag regression** — release review restored generated config to `[features].hooks = true`, repairs stale/unreleased `[features].hooks = true` aliases, and updates setup/docs/tests/plugin mirrors accordingly.
 - **Release body generation** — `RELEASE_BODY.md` again includes the required contributors anchor for generated GitHub release notes.
 
 ### PRs
