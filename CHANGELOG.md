@@ -49,7 +49,7 @@ Post-`0.16.1` release-train correction and workflow hardening: aggregate `$ultra
 ### Fixed
 
 - **Stateful workflow session isolation** — session-scoped workflow state no longer inherits or autocompletes from root/global workflow entries; explicit `all_sessions` clears remain the global cleanup path.
-- **Codex hook feature-flag regression** — release review restored generated config to `[features].hooks = true`, repairs stale/unreleased `[features].hooks = true` aliases, and updates setup/docs/tests/plugin mirrors accordingly.
+- **Codex hook feature-flag regression** — release review restored generated config to `[features].hooks = true`, repairs legacy `[features].codex_hooks = true` aliases, and updates setup/docs/tests/plugin mirrors accordingly.
 - **Release body generation** — `RELEASE_BODY.md` again includes the required contributors anchor for generated GitHub release notes.
 
 ### PRs
