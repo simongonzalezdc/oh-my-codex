@@ -1427,9 +1427,11 @@ function inspectMadmaxDetachedContextLock(lockPath: string): MadmaxDetachedLockI
       };
     }
     const ownerContext = owner ? `, owner context ${owner.context_key}` : ", legacy pid-only lock";
+    const sameDirectoryGuidance =
+      "Another madmax detached launch is active for this directory; close the existing madmax session or use --worktree for concurrent work. Multiple madmax sessions in one directory are unsafe";
     return {
       stale: false,
-      diagnostic: `holder pid ${holderPid} is still running${ownerContext}; lock age ${Math.round(ageMs)}ms`,
+      diagnostic: `holder pid ${holderPid} is still running${ownerContext}; lock age ${Math.round(ageMs)}ms. ${sameDirectoryGuidance}`,
     };
   }
   if (ageMs > MADMAX_DETACHED_LOCK_STALE_MS) {

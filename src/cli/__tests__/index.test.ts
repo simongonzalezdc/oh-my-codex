@@ -268,6 +268,9 @@ describe("madmax state isolation", () => {
           assert.match(err.message, /timed out waiting for madmax detached launch context lock/);
           assert.match(err.message, new RegExp(`holder pid ${process.pid} is still running`));
           assert.match(err.message, /owner context live-context/);
+          assert.match(err.message, /Another madmax detached launch is active for this directory/);
+          assert.match(err.message, /close the existing madmax session or use --worktree for concurrent work/);
+          assert.match(err.message, /Multiple madmax sessions in one directory are unsafe/);
           return true;
         },
       );
