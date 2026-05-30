@@ -20,6 +20,7 @@ import { evaluateRalphCompletionAuditEvidence } from '../ralph/completion-audit.
 import { ensureCanonicalRalphArtifacts } from '../ralph/persistence.js';
 import { RALPH_PHASES, validateAndNormalizeRalphState } from '../ralph/contract.js';
 import { applyRunOutcomeContract } from '../runtime/run-outcome.js';
+import { readUltragoalState } from '../hud/state.js';
 import {
   SKILL_ACTIVE_STATE_MODE,
   readSkillActiveState,
@@ -28,6 +29,56 @@ import {
 } from './skill-active.js';
 import { isTrackedWorkflowMode } from './workflow-transition.js';
 import { reconcileWorkflowTransition } from './workflow-transition-reconcile.js';
+import {
+  buildAutopilotDeepInterviewRalplanGateError,
+  canAdvanceAutopilotDeepInterviewToRalplan,
+} from '../autopilot/deep-interview-gate.js';
+import {
+  type AutopilotChildPhase,
+  deriveAutopilotChildPhase,
+  normalizeAutopilotPhase,
+} from '../autopilot/fsm.js';
+import {
+  buildAutopilotRalplanUltragoalGateError,
+  canAdvanceAutopilotRalplanToUltragoal,
+} from '../autopilot/ralplan-gate.js';
+
+
+const AUTOPILOT_CHILD_PHASE_ORDER: AutopilotChildPhase[] = [
+  'deep-interview',
+  'ralplan',
+  'ultragoal',
+  'team',
+  'ralph',
+  'code-review',
+  'ultraqa',
+];
+
+function autopilotPhaseOrder(phase: AutopilotChildPhase | null): number {
+  return phase ? AUTOPILOT_CHILD_PHASE_ORDER.indexOf(phase) : -1;
+}
+
+function isForwardAutopilotPhase(
+  currentPhase: AutopilotChildPhase | null,
+  nextPhase: AutopilotChildPhase | null,
+): boolean {
+  const currentOrder = autopilotPhaseOrder(currentPhase);
+  const nextOrder = autopilotPhaseOrder(nextPhase);
+  return currentOrder >= 0 && nextOrder > currentOrder;
+}
+
+function isNextAutopilotPhase(
+  currentPhase: AutopilotChildPhase | null,
+  nextPhase: AutopilotChildPhase | null,
+): boolean {
+  const currentOrder = autopilotPhaseOrder(currentPhase);
+  const nextOrder = autopilotPhaseOrder(nextPhase);
+  return currentOrder >= 0 && nextOrder === currentOrder + 1;
+}
+
+function isAutopilotCompletePhase(state: Record<string, unknown>): boolean {
+  return normalizeAutopilotPhase(state.current_phase) === 'complete';
+}
 
 export const SUPPORTED_STATE_READ_MODES = [
   'autopilot',
@@ -173,6 +224,19 @@ export async function listStateStatuses(
     }
   }
 
+  if (!mode || mode === 'ultragoal') {
+    const ultragoal = await readUltragoalState(cwd).catch(() => null);
+    if (ultragoal && (ultragoal.active || (mode === 'ultragoal' && !seenModes.has('ultragoal')))) {
+      statuses.ultragoal = {
+        active: ultragoal.active,
+        phase: ultragoal.status,
+        path: join(cwd, '.omx', 'ultragoal', 'goals.json'),
+        data: ultragoal,
+        source: 'ultragoal-artifacts',
+      };
+    }
+  }
+
   return statuses;
 }
 
@@ -308,6 +372,86 @@ export async function executeStateOperation(
               return;
             }
             Object.assign(mergedRaw, runOutcomeValidation.state);
+          }
+
+          const currentAutopilotChildPhase = mode === 'autopilot'
+            ? deriveAutopilotChildPhase({ mode: 'autopilot', ...existing })
+            : null;
+          const nextAutopilotChildPhase = mode === 'autopilot'
+            ? deriveAutopilotChildPhase({ mode: 'autopilot', ...mergedRaw })
+            : null;
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'deep-interview'
+            && isAutopilotCompletePhase(mergedRaw)
+          ) {
+            validationError = 'Cannot complete Autopilot before ralplan gate: deep-interview may only advance to ralplan.';
+            return;
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'ralplan'
+            && isAutopilotCompletePhase(mergedRaw)
+          ) {
+            validationError = 'Cannot complete Autopilot before ultragoal gate: ralplan may only advance to ultragoal.';
+            return;
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'deep-interview'
+            && isForwardAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+            && !isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+          ) {
+            validationError = 'Cannot skip Autopilot ralplan gate: deep-interview may only advance to ralplan.';
+            return;
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'deep-interview'
+            && isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+          ) {
+            const gate = await canAdvanceAutopilotDeepInterviewToRalplan({
+              cwd,
+              sessionId: effectiveSessionId,
+              baseStateDir,
+              currentState: existing as Record<string, unknown>,
+              nextState: mergedRaw,
+            });
+            if (!gate.allowed) {
+              validationError = buildAutopilotDeepInterviewRalplanGateError(gate);
+              return;
+            }
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'ralplan'
+            && isForwardAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+            && !isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+          ) {
+            validationError = 'Cannot skip Autopilot ultragoal gate: ralplan may only advance to ultragoal.';
+            return;
+          }
+
+          if (
+            mode === 'autopilot'
+            && currentAutopilotChildPhase === 'ralplan'
+            && isNextAutopilotPhase(currentAutopilotChildPhase, nextAutopilotChildPhase)
+          ) {
+            const gate = canAdvanceAutopilotRalplanToUltragoal({
+              cwd,
+              sessionId: effectiveSessionId,
+              currentState: existing as Record<string, unknown>,
+              nextState: mergedRaw,
+            });
+            if (!gate.allowed) {
+              validationError = buildAutopilotRalplanUltragoalGateError(gate);
+              return;
+            }
           }
 
           if (isTrackedWorkflowMode(mode) && mergedRaw.active === true) {

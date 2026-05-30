@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "fs/promis
 import { extname, join, relative, resolve } from "path";
 import { pathToFileURL } from "url";
 import { readModeStateForActiveDecision, readModeStateForSession, updateModeState } from "../modes/base.js";
+import { redactAuthSecrets } from "../auth/redact.js";
 import {
   SKILL_ACTIVE_STATE_FILE,
   extractSessionIdFromInitializedStatePath,
@@ -14,6 +15,7 @@ import {
   type SkillActiveStateLike,
 } from "../state/skill-active.js";
 import {
+  isTrustedSubagentThread,
   readSubagentSessionSummary,
   readSubagentTrackingState,
   recordSubagentTurnForSession,
@@ -108,6 +110,10 @@ import {
   isFinalHandoffDocumentRefreshCandidate,
 } from "../document-refresh/enforcer.js";
 import { buildExecFollowupStopOutput } from "../exec/followup.js";
+import {
+  MAX_NATIVE_STDIN_JSON_BYTES,
+  extractRawCodexHookEventName,
+} from "./hook-payload-guard.js";
 
 type CodexHookEventName =
   | "SessionStart"
@@ -142,6 +148,7 @@ const ORDINARY_STOP_NO_PROGRESS_DEFAULT_MAX_REPEATS = 8;
 const RALPH_ORPHANED_STARTING_STALE_MS = 15 * 60_000;
 const ORDINARY_STOP_NO_PROGRESS_DEFAULT_IDLE_MS = 10 * 60_000;
 const ORDINARY_STOP_NO_PROGRESS_MAX_MESSAGE_LENGTH = 240;
+const OMX_OWNER_SESSION_ID_PATTERN = /^omx-[A-Za-z0-9_-]{1,60}$/;
 const STABLE_FINAL_RECOMMENDATION_PATTERNS = [
   /^\s*(?:launch|release|ship)-?ready\s*:\s*(?:yes|no)\b[^\n\r]*/im,
   /^\s*ready to release\s*:\s*(?:yes|no)\b[^\n\r]*/im,
@@ -170,6 +177,16 @@ function safeString(value: unknown): string {
 
 function safeObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function resolveHudReconcileSessionId(
+  currentSessionState: SessionState | null,
+  canonicalSessionId: string | null,
+  sessionIdForState: string | null,
+): string | undefined {
+  const ownerOmxSessionId = safeString(currentSessionState?.owner_omx_session_id).trim();
+  if (OMX_OWNER_SESSION_ID_PATTERN.test(ownerOmxSessionId)) return ownerOmxSessionId;
+  return canonicalSessionId || sessionIdForState || undefined;
 }
 
 function safeContextSnippet(value: unknown, maxLength = 300): string {
@@ -248,18 +265,25 @@ async function recordNativeSubagentSessionStart(
   metadata: NativeSubagentSessionStartMetadata,
   transcriptPath: string,
 ): Promise<void> {
+  const parentThreadId = metadata.parentThreadId.trim();
+  const childThreadId = childSessionId.trim();
   const trackingSessionIds = [...new Set([
     canonicalSessionId.trim(),
-    metadata.parentThreadId.trim(),
+    parentThreadId,
   ].filter(Boolean))];
   for (const sessionId of trackingSessionIds) {
+    if (parentThreadId && parentThreadId !== childThreadId) {
+      await recordSubagentTurnForSession(cwd, {
+        sessionId,
+        threadId: parentThreadId,
+        kind: 'leader',
+      }).catch(() => {});
+    }
     await recordSubagentTurnForSession(cwd, {
       sessionId,
-      threadId: metadata.parentThreadId,
-    }).catch(() => {});
-    await recordSubagentTurnForSession(cwd, {
-      sessionId,
-      threadId: childSessionId,
+      threadId: childThreadId,
+      kind: 'subagent',
+      ...(parentThreadId && parentThreadId !== childThreadId ? { leaderThreadId: parentThreadId } : {}),
       mode: metadata.agentRole,
     }).catch(() => {});
   }
@@ -301,17 +325,54 @@ async function isNativeSubagentHook(
   canonicalSessionId: string,
   nativeSessionId: string,
   threadId: string,
+  canonicalLeaderNativeSessionId = "",
 ): Promise<boolean> {
-  const candidateIds = [nativeSessionId, threadId]
+  const nativeId = nativeSessionId.trim();
+  const promptThreadId = threadId.trim();
+  const candidateIds = [nativeId, promptThreadId]
     .map((value) => value.trim())
     .filter(Boolean);
   if (candidateIds.length === 0) return false;
 
   const sessionId = canonicalSessionId.trim();
-  if (sessionId) {
-    const summary = await readSubagentSessionSummary(cwd, sessionId).catch(() => null);
-    if (summary && candidateIds.some((id) => summary.allSubagentThreadIds.includes(id))) {
-      return true;
+  const currentLeaderNativeSessionId = canonicalLeaderNativeSessionId.trim();
+  const summary = sessionId
+    ? await readSubagentSessionSummary(cwd, sessionId).catch(() => null)
+    : null;
+  const currentLeaderIds = new Set([
+    currentLeaderNativeSessionId,
+    summary?.leaderThreadId?.trim(),
+  ].filter(Boolean));
+  if (
+    summary
+    && candidateIds.some((id) => !currentLeaderIds.has(id) && summary.allSubagentThreadIds.includes(id))
+  ) {
+    return true;
+  }
+  // Native UserPromptSubmit can carry a per-turn thread_id that differs from
+  // the long-lived native session id.  Treat the current canonical native
+  // session as the leader before consulting stale/global tracker state.
+  if (
+    sessionId
+    && currentLeaderNativeSessionId
+    && (
+      nativeId === currentLeaderNativeSessionId
+      || (!nativeId && promptThreadId === currentLeaderNativeSessionId)
+    )
+  ) {
+    return false;
+  }
+
+  if (summary) {
+    const leaderThreadId = summary.leaderThreadId?.trim();
+    if (
+      leaderThreadId
+      && (
+        nativeId === leaderThreadId
+        || (!nativeId && promptThreadId === leaderThreadId)
+      )
+    ) {
+      return false;
     }
   }
 
@@ -326,7 +387,7 @@ async function isNativeSubagentHook(
   if (!trackingState) return false;
 
   return Object.values(trackingState.sessions).some((session) => (
-    candidateIds.some((id) => session.threads[id]?.kind === "subagent")
+    candidateIds.some((id) => isTrustedSubagentThread(session, id))
   ));
 }
 
@@ -1702,15 +1763,23 @@ function buildSkillStateCliInstruction(mode: string, statePath: string): string 
   return `skill: ${mode} activated and initial state initialized at ${statePath}; use CLI-first state updates via \`omx state write/read/clear --input '<json>' --json\`; use omx_state MCP only when explicit MCP compatibility is enabled.`;
 }
 
-function buildAutopilotPromptActivationNote(skillState?: SkillActiveState | null): string | null {
+function buildAutopilotPromptActivationNote(
+  skillState?: SkillActiveState | null,
+  options: { markedQuestionAnswer?: boolean } = {},
+): string | null {
   if (skillState?.initialized_mode !== "autopilot") return null;
   return [
     "Autopilot protocol: the durable default chain is $deep-interview -> $ralplan -> $ultragoal (+ $team if needed) -> $code-review -> $ultraqa (deep-interview -> ralplan -> ultragoal -> code-review -> ultraqa).",
     "Start/resume at current_phase=deep-interview unless the task is clear and bounded; if deep-interview is intentionally skipped, persist and state an explicit deep_interview_gate.skip_reason before moving to ralplan.",
+    "Deep-interview is a structured question chain, not a one-question gate: after an omx question answer, re-score ambiguity against the active threshold, treat max_rounds as a cap, and crystallize once ambiguity is at or below threshold and readiness gates pass.",
+    options.markedQuestionAnswer
+      ? "This turn is a marked omx question answer. Treat ordinary selected option/freeform answer text as interview input, then re-score. Do not close merely because the first question was answered; if ambiguity is at or below threshold and readiness gates pass, write interview_complete evidence and hand off. Ask another deep-interview follow-up only when a readiness gate remains unresolved and the answer would materially change execution."
+      : null,
+    "Do not advance from deep-interview to ralplan merely because the first question was answered; persist explicit interview_complete evidence before setting current_phase=ralplan, and do advance when threshold plus readiness gates are satisfied.",
     "The ralplan phase is not complete until Planner output has been reviewed sequentially by Architect and then Critic; do not hand off to Ultragoal or implementation until the ralplan state/artifact records both ralplan_architect_review and ralplan_critic_review with approval or an explicit blocker.",
     "Do not silently fall back to ordinary $plan/ralplan-only handling; keep autopilot-state.json, skill-active-state.json, HUD/statusline, and Codex goal-mode handoff guidance visible while the workflow is active.",
     "When Codex goal tools are available, call get_goal/create_goal only from the active thread handoff and treat the active goal as the completion contract until code-review and ultraqa are clean.",
-  ].join(" ");
+  ].filter(Boolean).join(" ");
 }
 
 function buildAdditionalContextMessage(
@@ -1730,6 +1799,8 @@ function buildAdditionalContextMessage(
       ? buildDeepInterviewQuestionBridgeInstruction(cwd, payload)
       : null;
     const deepInterviewConfigPromptActivationNote = buildDeepInterviewConfigInstruction(cwd, skillState);
+    const markedQuestionAnswer = /^\s*\[omx question answered\]/i.test(prompt);
+    const autopilotPromptActivationNote = buildAutopilotPromptActivationNote(skillState, { markedQuestionAnswer });
     return [
       `OMX native UserPromptSubmit continued active workflow skill "${continuedSkill}".`,
       promptPriorityMessage,
@@ -1738,12 +1809,36 @@ function buildAdditionalContextMessage(
         : null,
       deepInterviewPromptActivationNote,
       deepInterviewConfigPromptActivationNote,
+      autopilotPromptActivationNote,
       "Follow AGENTS.md routing and preserve workflow transition and planning-safety rules.",
     ].filter(Boolean).join(" ");
   }
   const detectedKeywordMessage = matches.length > 1
     ? `OMX native UserPromptSubmit detected workflow keywords ${matches.map((entry) => `"${entry.keyword}" -> ${entry.skill}`).join(", ")}.`
     : `OMX native UserPromptSubmit detected workflow keyword "${match.keyword}" -> ${match.skill}.`;
+  const continuedSkill = safeString(skillState?.skill).trim();
+  if (
+    continuedSkill
+    && continuedSkill !== match.skill
+    && /^\s*\[omx question answered\]/i.test(prompt)
+  ) {
+    const deepInterviewPromptActivationNote = skillState?.initialized_mode === "deep-interview"
+      ? buildDeepInterviewQuestionBridgeInstruction(cwd, payload)
+      : null;
+    const deepInterviewConfigPromptActivationNote = buildDeepInterviewConfigInstruction(cwd, skillState);
+    const autopilotPromptActivationNote = buildAutopilotPromptActivationNote(skillState, { markedQuestionAnswer: true });
+    return [
+      `OMX native UserPromptSubmit continued active workflow skill "${continuedSkill}"; workflow-like tokens inside the marked omx question answer are treated as answer text, not a new workflow activation.`,
+      promptPriorityMessage,
+      skillState?.initialized_mode && skillState.initialized_state_path
+        ? buildSkillStateCliInstruction(skillState.initialized_mode, skillState.initialized_state_path)
+        : null,
+      deepInterviewPromptActivationNote,
+      deepInterviewConfigPromptActivationNote,
+      autopilotPromptActivationNote,
+      "Follow AGENTS.md routing and preserve workflow transition and planning-safety rules.",
+    ].filter(Boolean).join(" ");
+  }
   const activeSkills = Array.isArray(skillState?.active_skills)
     ? skillState.active_skills.map((entry) => entry.skill)
     : [];
@@ -2400,12 +2495,32 @@ const DEEP_INTERVIEW_ALLOWED_WRITE_PREFIXES = [
   ".omx/state",
 ] as const;
 
-const DEEP_INTERVIEW_IMPLEMENTATION_TOOL_NAMES = new Set([
+const RALPLAN_ALLOWED_WRITE_PREFIXES = [
+  ".omx/context",
+  ".omx/plans",
+  ".omx/specs",
+  ".omx/state",
+] as const;
+
+const PLANNING_MODE_IMPLEMENTATION_TOOL_NAMES = new Set([
   "Write",
   "Edit",
   "MultiEdit",
+  "NotebookEdit",
   "apply_patch",
   "ApplyPatch",
+]);
+
+const DEEP_INTERVIEW_IMPLEMENTATION_TOOL_NAMES = PLANNING_MODE_IMPLEMENTATION_TOOL_NAMES;
+
+const RALPLAN_EXECUTION_HANDOFF_SKILLS = new Set([
+  "autopilot",
+  "autoresearch",
+  "ralph",
+  "team",
+  "ultragoal",
+  "ultrawork",
+  "ultraqa",
 ]);
 
 function isActiveDeepInterviewPhase(state: Record<string, unknown> | null): boolean {
@@ -2417,7 +2532,39 @@ function isActiveDeepInterviewPhase(state: Record<string, unknown> | null): bool
   return true;
 }
 
-function isAllowedDeepInterviewArtifactPath(cwd: string, rawPath: string): boolean {
+function isActiveRalplanPhase(state: Record<string, unknown> | null): boolean {
+  if (!state || state.active !== true) return false;
+  const mode = safeString(state.mode).trim();
+  if (mode && mode !== "ralplan") return false;
+  const phase = safeString(state.current_phase ?? state.currentPhase).trim().toLowerCase();
+  if (phase && (TERMINAL_MODE_PHASES.has(phase) || phase === "completing")) return false;
+  return true;
+}
+
+function isActiveAutopilotRalplanPhase(state: Record<string, unknown> | null): boolean {
+  if (!state || state.active !== true) return false;
+  const mode = safeString(state.mode).trim();
+  if (mode && mode !== "autopilot") return false;
+  const phase = safeString(state.current_phase ?? state.currentPhase).trim().toLowerCase();
+  return phase === "ralplan";
+}
+
+function hasExplicitExecutionHandoffSkill(
+  state: SkillActiveStateLike | null,
+  sessionId: string,
+  threadId: string,
+): boolean {
+  return listActiveSkills(state ?? {}).some((entry) => (
+    RALPLAN_EXECUTION_HANDOFF_SKILLS.has(entry.skill)
+    && matchesSkillStopContext(entry, state ?? {}, sessionId, threadId)
+  ));
+}
+
+function isAllowedPlanningArtifactPath(
+  cwd: string,
+  rawPath: string,
+  allowedPrefixes: readonly string[],
+): boolean {
   const trimmed = rawPath.trim().replace(/^['"]|['"]$/g, "");
   if (!trimmed || trimmed.includes("\0")) return false;
   let relativePath: string;
@@ -2428,9 +2575,17 @@ function isAllowedDeepInterviewArtifactPath(cwd: string, rawPath: string): boole
     return false;
   }
   if (!relativePath || relativePath.startsWith("..") || relativePath.startsWith("/")) return false;
-  return DEEP_INTERVIEW_ALLOWED_WRITE_PREFIXES.some((prefix) => (
+  return allowedPrefixes.some((prefix) => (
     relativePath === prefix || relativePath.startsWith(`${prefix}/`)
   ));
+}
+
+function isAllowedDeepInterviewArtifactPath(cwd: string, rawPath: string): boolean {
+  return isAllowedPlanningArtifactPath(cwd, rawPath, DEEP_INTERVIEW_ALLOWED_WRITE_PREFIXES);
+}
+
+function isAllowedRalplanArtifactPath(cwd: string, rawPath: string): boolean {
+  return isAllowedPlanningArtifactPath(cwd, rawPath, RALPLAN_ALLOWED_WRITE_PREFIXES);
 }
 
 function readPreToolUseCommand(payload: CodexHookPayload): string {
@@ -2500,6 +2655,86 @@ async function readActiveDeepInterviewStateForPreToolUse(
     && matchesSkillStopContext(entry, canonicalState, sessionId, threadId)
   ));
   return hasActiveDeepInterviewSkill ? modeState : null;
+}
+
+async function readActiveRalplanStateForPreToolUse(
+  cwd: string,
+  stateDir: string,
+  sessionId: string,
+  threadId: string,
+): Promise<Record<string, unknown> | null> {
+  const modeState = sessionId
+    ? await readStopSessionPinnedState("ralplan-state.json", cwd, sessionId, stateDir)
+    : await readJsonIfExists(join(stateDir, "ralplan-state.json"));
+  const canonicalState = sessionId
+    ? await readVisibleSkillActiveStateForStateDir(stateDir, sessionId)
+    : await readSkillActiveState(join(stateDir, SKILL_ACTIVE_STATE_FILE));
+  if (isActiveRalplanPhase(modeState) && modeState && modeStateMatchesSkillStopContext(modeState, cwd, sessionId)) {
+    if (hasExplicitExecutionHandoffSkill(canonicalState, sessionId, threadId)) return null;
+    if (!canonicalState) return modeState;
+    const hasActiveRalplanSkill = listActiveSkills(canonicalState).some((entry) => (
+      entry.skill === "ralplan"
+      && matchesSkillStopContext(entry, canonicalState, sessionId, threadId)
+    ));
+    if (hasActiveRalplanSkill) return modeState;
+  }
+
+  const autopilotState = sessionId
+    ? await readStopSessionPinnedState("autopilot-state.json", cwd, sessionId, stateDir)
+    : await readJsonIfExists(join(stateDir, "autopilot-state.json"));
+  if (!isActiveAutopilotRalplanPhase(autopilotState) || !autopilotState) return null;
+  if (!modeStateMatchesSkillStopContext(autopilotState, cwd, sessionId)) return null;
+  const terminalAutopilotRunState = await readCanonicalTerminalRunStateForStop(cwd, sessionId, "autopilot");
+  if (terminalAutopilotRunState) return null;
+  if (!canonicalState) return autopilotState;
+  const hasActiveAutopilotSkill = listActiveSkills(canonicalState).some((entry) => (
+    entry.skill === "autopilot"
+    && matchesSkillStopContext(entry, canonicalState, sessionId, threadId)
+  ));
+  return hasActiveAutopilotSkill ? autopilotState : null;
+}
+
+function isAllowedRalplanBashWrite(cwd: string, command: string): boolean {
+  if (!commandHasDeepInterviewWriteIntent(command)) return true;
+  if (/\bomx\s+(?:state\s+(?:write|read|clear)|question)\b/.test(command)) return true;
+  const targets = extractDeepInterviewCommandWriteTargets(command);
+  return targets.length > 0 && targets.every((target) => isAllowedRalplanArtifactPath(cwd, target));
+}
+
+async function buildRalplanPreToolUseBoundaryOutput(
+  payload: CodexHookPayload,
+  cwd: string,
+  stateDir: string,
+): Promise<Record<string, unknown> | null> {
+  const sessionId = readPayloadSessionId(payload);
+  const threadId = readPayloadThreadId(payload);
+  const activeState = await readActiveRalplanStateForPreToolUse(cwd, stateDir, sessionId, threadId);
+  if (!activeState) return null;
+
+  const toolName = safeString(payload.tool_name).trim();
+  const command = readPreToolUseCommand(payload);
+  const pathCandidates = readPreToolUsePathCandidates(payload);
+  let blocked = false;
+
+  if (toolName === "Bash") {
+    blocked = !isAllowedRalplanBashWrite(cwd, command);
+  } else if (PLANNING_MODE_IMPLEMENTATION_TOOL_NAMES.has(toolName)) {
+    blocked = pathCandidates.length === 0
+      || !pathCandidates.every((candidate) => isAllowedRalplanArtifactPath(cwd, candidate));
+  }
+
+  if (!blocked) return null;
+
+  const phase = formatPhase(activeState.current_phase ?? activeState.currentPhase, "planning");
+  return {
+    decision: "block",
+    reason: `Ralplan is active (phase: ${phase}); implementation/write tools are blocked until an explicit execution handoff workflow is activated.`,
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      additionalContext:
+        "Ralplan is consensus-planning mode. Write only planning artifacts under `.omx/context/`, `.omx/plans/`, `.omx/specs/`, or required `.omx/state/` files. Do not edit implementation files or run implementation-focused writes from ralplan. To execute, first process an explicit handoff such as `$ultragoal`, `$team`, or `$ralph`, which must emit terminal ralplan state before implementation begins.",
+    },
+  };
 }
 
 async function buildDeepInterviewPreToolUseBoundaryOutput(
@@ -2827,15 +3062,15 @@ function buildRalplanContinuationStatus(
   }
 
   const completeHint = blocker.planningComplete
-    ? " The planning artifacts are present; if consensus is approved, emit the final complete/approved handoff instead of stopping here."
+    ? " The planning artifacts are present; if consensus is approved, emit terminal ralplan complete/approved handoff state and stop planning. Implementation must wait for an explicit $ultragoal, $team, or $ralph handoff."
     : "";
 
   return {
     reason:
-      `Status: continue_from_artifact — ralplan is still active (phase: ${phase}) and has not emitted a terminal complete/paused/waiting status. Continue from the current ralplan artifact, resolve any review ambiguity conservatively or ask the user if needed, and proceed to the next planning/review step before stopping.${artifact}${completeHint}`,
+      `Status: continue_from_artifact — ralplan is still active (phase: ${phase}) and has not emitted a terminal complete/paused/waiting status. Continue from the current ralplan artifact, resolve any review ambiguity conservatively or ask the user if needed, and proceed to the next planning/review step before stopping; do not begin implementation from ralplan.${artifact}${completeHint}`,
     stopReasonSuffix: "continue_artifact",
     systemMessage:
-      `OMX ralplan status: continue_from_artifact at phase ${phase}; continue from the current ralplan artifact and finish by stating whether ralplan is complete, paused for review, waiting for input, or still continuing.`,
+      `OMX ralplan status: continue_from_artifact at phase ${phase}; continue from the current ralplan artifact and finish by stating whether ralplan is complete, paused for review, waiting for input, or still continuing; do not begin implementation from ralplan.`,
   };
 }
 
@@ -3732,6 +3967,14 @@ export async function dispatchCodexNativeHook(
 ): Promise<NativeHookDispatchResult> {
   const hookEventName = readHookEventName(payload);
   const cwd = options.cwd ?? (safeString(payload.cwd).trim() || process.cwd());
+  if (hookEventName === "Stop" && !hasNativeStopRuntimeSurface(cwd)) {
+    return {
+      hookEventName,
+      omxEventName: mapCodexHookEventToOmxEvent(hookEventName),
+      skillState: null,
+      outputJson: null,
+    };
+  }
   // Native hooks must use the same authoritative runtime state root as HUD/MCP
   // when boxed/team roots are active; do not bypass it with cwd/.omx/state.
   const stateDir = getBaseStateDir(cwd);
@@ -3814,7 +4057,13 @@ export async function dispatchCodexNativeHook(
   const sessionIdForState = canonicalSessionId || nativeSessionId;
   let outputJson: Record<string, unknown> | null = null;
   const isSubagentPromptSubmit = hookEventName === "UserPromptSubmit"
-    ? await isNativeSubagentHook(cwd, canonicalSessionId, nativeSessionId, threadId)
+    ? await isNativeSubagentHook(
+      cwd,
+      canonicalSessionId,
+      nativeSessionId,
+      threadId,
+      safeString(currentSessionState?.native_session_id).trim(),
+    )
     : false;
   const isSubagentStop = hookEventName === "Stop"
     ? (await Promise.all(
@@ -3822,7 +4071,15 @@ export async function dispatchCodexNativeHook(
         canonicalSessionId,
         safeString(currentSessionState?.session_id).trim(),
       ].filter(Boolean))]
-        .map((candidateSessionId) => isNativeSubagentHook(cwd, candidateSessionId, nativeSessionId, threadId)),
+        .map((candidateSessionId) => isNativeSubagentHook(
+          cwd,
+          candidateSessionId,
+          nativeSessionId,
+          threadId,
+          candidateSessionId === safeString(currentSessionState?.session_id).trim()
+            ? safeString(currentSessionState?.native_session_id).trim()
+            : "",
+        )),
     )).some(Boolean)
     : false;
   const suppressNoisySubagentLifecycleDispatch =
@@ -3926,7 +4183,12 @@ export async function dispatchCodexNativeHook(
       && await isConfirmedTeamWorkerPromptSubmitPane(cwd).catch(() => false);
     if (!skipHudReconcileForTeamWorkerPane) {
       const reconcileHudForPromptSubmitFn = options.reconcileHudForPromptSubmitFn ?? reconcileHudForPromptSubmit;
-      await reconcileHudForPromptSubmitFn(cwd, { sessionId: canonicalSessionId || sessionIdForState || undefined }).catch(() => {});
+      const hudSessionId = resolveHudReconcileSessionId(
+        currentSessionState,
+        canonicalSessionId,
+        sessionIdForState,
+      );
+      await reconcileHudForPromptSubmitFn(cwd, { sessionId: hudSessionId }).catch(() => {});
     }
   }
 
@@ -3987,6 +4249,7 @@ export async function dispatchCodexNativeHook(
     }
   } else if (hookEventName === "PreToolUse") {
     outputJson = await buildDeepInterviewPreToolUseBoundaryOutput(payload, cwd, stateDir)
+      ?? await buildRalplanPreToolUseBoundaryOutput(payload, cwd, stateDir)
       ?? buildNativePreToolUseOutput(payload);
   } else if (hookEventName === "PostToolUse") {
     if (detectMcpTransportFailure(payload)) {
@@ -4008,9 +4271,31 @@ export async function dispatchCodexNativeHook(
   };
 }
 
+function hasNativeStopRuntimeSurface(cwd: string): boolean {
+  if (existsSync(join(cwd, ".omx"))) return true;
+  if (findGitLayout(cwd)) return true;
+  const omxRoot = safeString(process.env.OMX_ROOT).trim();
+  if (omxRoot && existsSync(join(omxRoot, ".omx"))) return true;
+  const stateRoot = safeString(process.env.OMX_STATE_ROOT).trim();
+  if (stateRoot && existsSync(stateRoot)) return true;
+  return [
+    process.env.OMX_SESSION_ID,
+    process.env.OMX_TEAM_INTERNAL_WORKER,
+    process.env.OMX_TEAM_WORKER,
+    process.env.OMX_TEAM_STATE_ROOT,
+    process.env.OMX_TEAM_LEADER_CWD,
+    process.env.OMX_NOTIFY_HOOK_TRUSTED_MANAGED_CWD,
+    process.env.OMX_TMUX_HUD_OWNER,
+    process.env.OMX_TMUX_HUD_LEADER_PANE,
+  ].some((value) => safeString(value).trim() !== "");
+}
+
 interface NativeHookCliReadResult {
   payload: CodexHookPayload;
   parseError: Error | null;
+  rawInput: string;
+  oversized: boolean;
+  rawHookEventName: CodexHookEventName | null;
 }
 
 export function isCodexNativeHookMainModule(
@@ -4023,29 +4308,148 @@ export function isCodexNativeHookMainModule(
 
 async function readStdinJson(): Promise<NativeHookCliReadResult> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let oversized = false;
   for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_NATIVE_STDIN_JSON_BYTES) {
+      const remaining = Math.max(0, MAX_NATIVE_STDIN_JSON_BYTES - (totalBytes - buffer.byteLength));
+      if (remaining > 0) chunks.push(Buffer.from(buffer.subarray(0, remaining)));
+      oversized = true;
+      process.stdin.destroy();
+      break;
+    }
+    chunks.push(buffer);
   }
   const raw = Buffer.concat(chunks).toString("utf-8").trim();
+  const rawHookEventName = extractRawCodexHookEventName(raw);
+  if (oversized) {
+    return {
+      payload: {},
+      parseError: null,
+      rawInput: raw,
+      oversized: true,
+      rawHookEventName,
+    };
+  }
   if (!raw) {
-    return { payload: {}, parseError: null };
+    return { payload: {}, parseError: null, rawInput: raw, oversized: false, rawHookEventName };
   }
 
   try {
     return {
       payload: safeObject(JSON.parse(raw)),
       parseError: null,
+      rawInput: raw,
+      oversized: false,
+      rawHookEventName,
     };
   } catch (error) {
     return {
       payload: {},
       parseError: error instanceof Error ? error : new Error(String(error)),
+      rawInput: raw,
+      oversized: false,
+      rawHookEventName,
     };
   }
 }
 
+function inferHookEventNameFromMalformedInput(raw: string): CodexHookEventName | null {
+  const match = raw.match(/(?:\"|['"])?hook[_-]?event[_-]?name(?:\"|['"])?\s*:\s*(?:\"|['"])?(SessionStart|PreToolUse|PostToolUse|UserPromptSubmit|PreCompact|PostCompact|Stop)\b/i);
+  const value = match?.[1];
+  if (!value) return null;
+  return readHookEventName({ hook_event_name: value });
+}
+
+function buildMalformedStdinHookOutput(parseError: Error, rawInput: string): Record<string, unknown> {
+  const reason =
+    "OMX native hook received malformed JSON input. Preserve runtime state, inspect the emitting hook payload yourself, and retry with valid JSON.";
+  const systemMessage =
+    `${reason} stdin JSON parsing failed inside codex-native-hook: ${parseError.message}.`;
+  if (inferHookEventNameFromMalformedInput(rawInput) === "Stop") {
+    return {
+      decision: "block",
+      reason,
+      stopReason: "native_hook_stdin_parse_error",
+      systemMessage,
+    };
+  }
+  return {
+    continue: false,
+    stopReason: "native_hook_stdin_parse_error",
+    systemMessage,
+  };
+}
+
+async function buildOversizedStopActiveWorkflowOutput(cwd: string): Promise<Record<string, unknown> | null> {
+  const currentSession = await readUsableSessionState(cwd);
+  const currentSessionId = safeString(currentSession?.session_id).trim()
+    || safeString(process.env.OMX_SESSION_ID || process.env.CODEX_SESSION_ID).trim();
+  if (!currentSessionId) return null;
+
+  if (await readCanonicalTerminalRunStateForStop(cwd, currentSessionId, "autopilot")) return null;
+
+  const autopilotState = await readModeStateForActiveDecision("autopilot", currentSessionId, cwd);
+  if (!autopilotState || !shouldContinueRun(autopilotState)) return null;
+
+  const phase = formatPhase(autopilotState.current_phase);
+  const reason =
+    `OMX native Stop received oversized stdin before parsing while the current session has active OMX autopilot state (phase: ${phase}); continue once with a compact response or reduce hook payload size so normal Stop gates can run.`;
+  return {
+    decision: "block",
+    reason,
+    stopReason: "native_stop_stdin_oversized_active_workflow",
+    systemMessage:
+      "OMX native Stop rejected oversized stdin before parsing; active current-session workflow state is present, so Stop is blocked instead of silently allowing termination.",
+  };
+}
+
+async function buildOversizedStdinHookOutput(
+  rawHookEventName: CodexHookEventName | null,
+  cwd: string,
+): Promise<Record<string, unknown>> {
+  if (rawHookEventName === "Stop") {
+    return await buildOversizedStopActiveWorkflowOutput(cwd) ?? {};
+  }
+  const systemMessage =
+    `OMX native hook rejected oversized stdin JSON before parsing; maxBytes=${MAX_NATIVE_STDIN_JSON_BYTES}.`;
+  return {
+    continue: false,
+    stopReason: "native_hook_stdin_oversized",
+    systemMessage,
+  };
+}
+
 function writeNativeHookJsonStdout(output: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(output)}\n`);
+}
+
+function redactMalformedHookPreview(rawInput: string): string {
+  const withoutControls = rawInput.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  const withoutAuthSecrets = redactAuthSecrets(withoutControls);
+  return withoutAuthSecrets
+    .replace(
+      /(["']?(?:prompt|user_prompt|input|text)["']?\s*:\s*)(["'])(?:\\.|(?!\2)[^\\])*\2/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(
+      /(["']?(?:prompt|user_prompt|input|text)["']?\s*:\s*)(["'])(?:\\.|[^\\])*$/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(
+      /(["']?(?:prompt|user_prompt|input|text)["']?\s*:\s*)(?!["'])[^,}]*/gi,
+      "$1[REDACTED]",
+    );
+}
+
+function buildRawInputLogFields(rawInput: string): Record<string, unknown> {
+  if (!rawInput) return {};
+  return {
+    raw_input_length: Buffer.byteLength(rawInput, "utf-8"),
+    raw_input_prefix: redactMalformedHookPreview(rawInput).slice(0, 240),
+  };
 }
 
 async function logNativeHookCliError(
@@ -4053,6 +4457,7 @@ async function logNativeHookCliError(
   type: string,
   error: unknown,
   payload: CodexHookPayload = {},
+  details: Record<string, unknown> = {},
 ): Promise<void> {
   const logsDir = join(cwd || process.cwd(), ".omx", "logs");
   await mkdir(logsDir, { recursive: true }).catch(() => {});
@@ -4067,6 +4472,7 @@ async function logNativeHookCliError(
       thread_id: readPayloadThreadId(payload) || undefined,
       turn_id: readPayloadTurnId(payload) || undefined,
       error: error instanceof Error ? error.message : String(error),
+      ...details,
     }) + "\n",
   ).catch(() => {});
 }
@@ -4095,18 +4501,20 @@ function buildStopDispatchFailureOutput(error: unknown): Record<string, unknown>
 }
 
 export async function runCodexNativeHookCli(): Promise<void> {
-  const { payload, parseError } = await readStdinJson();
+  const { payload, parseError, rawInput, oversized, rawHookEventName } = await readStdinJson();
+  if (oversized) {
+    writeNativeHookJsonStdout(await buildOversizedStdinHookOutput(rawHookEventName, process.cwd()));
+    return;
+  }
   if (parseError) {
-    await logNativeHookCliError(process.cwd(), "native_hook_stdin_parse_error", parseError);
-    writeNativeHookJsonStdout({
-      decision: "block",
-      reason: "OMX native hook received malformed JSON input. Preserve runtime state, inspect the emitting hook payload yourself, and retry with valid JSON.",
-      hookSpecificOutput: {
-        hookEventName: "Unknown",
-        additionalContext:
-          `stdin JSON parsing failed inside codex-native-hook: ${parseError.message}. Emit valid JSON from the native hook caller before retrying.`,
-      },
-    });
+    await logNativeHookCliError(
+      process.cwd(),
+      "native_hook_stdin_parse_error",
+      parseError,
+      {},
+      buildRawInputLogFields(rawInput),
+    );
+    writeNativeHookJsonStdout(buildMalformedStdinHookOutput(parseError, rawInput));
     return;
   }
 

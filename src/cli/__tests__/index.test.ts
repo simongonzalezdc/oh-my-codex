@@ -54,6 +54,7 @@ import {
   buildDetachedSessionBootstrapSteps,
   buildDetachedTmuxSessionName,
   buildDetachedSessionFinalizeSteps,
+  shouldAttachDetachedTmuxSession,
   buildDetachedSessionRollbackSteps,
   detectDetachedSessionWindowIndex,
   resolveNotifyTempContract,
@@ -76,6 +77,7 @@ import {
   withTmuxExtendedKeys,
   serializeDetachedSessionParentEnv,
   CODEX_SQLITE_HOME_ENV,
+  DETACHED_TMUX_HISTORY_LIMIT,
 } from "../index.js";
 import { mergeConfig, repairConfigIfNeeded } from "../../config/generator.js";
 import { ensureReusableNodeModules } from "../../utils/repo-deps.js";
@@ -2844,7 +2846,7 @@ describe("tmux HUD pane helpers", () => {
       "-t",
       "%leader",
       "-F",
-      "#{pane_id}\t#{pane_current_command}\t#{pane_start_command}",
+      "#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}\x1f#{pane_current_path}",
     ]);
   });
 
@@ -3126,12 +3128,15 @@ describe("detached tmux new-session sequencing", () => {
     assert.doesNotMatch(argsText, /fake-provider-key/);
   });
 
-  it("runCodex coalesces stale same-leader HUD panes across session ids", async () => {
+  it("runCodex coalesces stale same-leader HUD panes across session ids and reuses a keeper", async () => {
     const source = await readFile(join(repoRoot, "src", "cli", "index.ts"), "utf8");
     assert.match(
       source,
       /const staleHudPaneIds = currentPaneId\s*\? listHudWatchPaneIdsInCurrentWindow\(currentPaneId, \{ sessionId, leaderPaneId: currentPaneId \}\)\s*: \[\];/,
     );
+    assert.match(source, /const \[keeperHudPaneId, \.\.\.duplicateHudPaneIds\] = staleHudPaneIds;/);
+    assert.match(source, /for \(const paneId of duplicateHudPaneIds\) \{\s*killTmuxPane\(paneId\);\s*\}/);
+    assert.match(source, /if \(keeperHudPaneId\) \{\s*hudPaneId = keeperHudPaneId;/);
     assert.doesNotMatch(
       source,
       /const staleHudPaneIds = listHudWatchPaneIdsInCurrentWindow\(currentPaneId, \{ leaderPaneId: currentPaneId \}\);/,
@@ -3342,6 +3347,7 @@ exit 0
         `#!/bin/sh
 printf 'codex:%s\\n' "$*" >> "${logPath}"
 printf 'codex-pwd:%s\\n' "$(pwd)" >> "${logPath}"
+printf 'codex-bridge-env:%s\\n' "\${OMX_HERMES_MCP_BRIDGE-unset}" >> "${logPath}"
 exit 0
 `,
       );
@@ -3390,6 +3396,7 @@ exit 0
           ...process.env,
           PATH: `${fakeBin}:/usr/bin:/bin`,
           HOME: cwd,
+          OMX_HERMES_MCP_BRIDGE: "1",
         },
         stdio: "ignore",
       });
@@ -3400,6 +3407,7 @@ exit 0
         normalizeDarwinTmpPath(log),
         new RegExp(`codex-pwd:${escapeRegExp(normalizeDarwinTmpPath(cwd))}`),
       );
+      assert.match(log, /codex-bridge-env:unset/);
       assert.match(log, /tmux:display-message -p #\{socket_path\}/);
       assert.match(log, /tmux:show-options -sv extended-keys/);
       assert.match(log, /tmux:set-option -sq extended-keys always/);
@@ -4214,6 +4222,9 @@ exit 0
       "%12",
       "3",
       true,
+      false,
+      true,
+      "%leader",
     );
     const names = steps.map((step) => step.name);
     const attachedIndex = names.indexOf("register-client-attached-reconcile");
@@ -4225,6 +4236,33 @@ exit 0
     assert.equal(attachIndex > scheduleIndex, true);
     assert.equal(names.includes("register-resize-hook"), true);
     assert.equal(names.includes("reconcile-hud-resize"), true);
+    assert.equal(DETACHED_TMUX_HISTORY_LIMIT, 500);
+    const historyHook = steps.find((step) => step.name === "register-detached-history-prune-hook");
+    assert.ok(historyHook);
+    assert.deepEqual(historyHook.args.slice(0, 3), ["set-hook", "-t", "omx-demo"]);
+    assert.match(historyHook.args[3] || "", /^client-detached\[[0-9]+\]$/);
+    assert.equal(
+      historyHook.args[4],
+      "if-shell -F '#{==:#{session_attached},0}' 'clear-history -t %leader'",
+    );
+  });
+
+  it("buildDetachedSessionFinalizeSteps skips attach for Hermes MCP bridge launches", () => {
+    assert.equal(shouldAttachDetachedTmuxSession({ OMX_HERMES_MCP_BRIDGE: "1" }), false);
+    assert.equal(shouldAttachDetachedTmuxSession({}), true);
+
+    const steps = buildDetachedSessionFinalizeSteps(
+      "omx-demo",
+      "%12",
+      "3",
+      true,
+      false,
+      shouldAttachDetachedTmuxSession({ OMX_HERMES_MCP_BRIDGE: "1" }),
+    );
+
+    assert.equal(steps.some((step) => step.name === "attach-session"), false);
+    assert.equal(steps.some((step) => step.name === "register-resize-hook"), true);
+    assert.equal(steps.some((step) => step.name === "set-mouse"), true);
   });
 
   it("buildDetachedSessionFinalizeSteps uses quiet best-effort tmux resize commands", () => {

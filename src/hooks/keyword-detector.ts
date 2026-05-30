@@ -41,6 +41,7 @@ import {
   resolveDeepInterviewRuntimeConfig,
   type DeepInterviewRuntimeConfig,
 } from '../config/deep-interview.js';
+import { inferTerminalLifecycleOutcome } from '../runtime/run-outcome.js';
 
 export interface KeywordMatch {
   keyword: string;
@@ -345,6 +346,22 @@ function resolveSeedStateFilePath(
   };
 }
 
+function isResettableTerminalModeState(state: Record<string, unknown> | null, expectedMode: string): boolean {
+  if (!state || safeString(state.mode).trim() !== expectedMode) return false;
+
+  const phase = safeString(state.current_phase).trim().toLowerCase().replace(/_/g, '-');
+  const terminalPhases = expectedMode === 'ralph'
+    ? ['blocked-on-user', 'complete', 'completed', 'failed', 'cancelled', 'canceled', 'stopped', 'user-stopped']
+    : ['complete', 'completed', 'failed', 'cancelled', 'canceled', 'stopped', 'user-stopped'];
+  if (terminalPhases.includes(phase)) return true;
+
+  const lifecycleOutcome = inferTerminalLifecycleOutcome(state, { includeQuestionEnforcement: false });
+  return lifecycleOutcome === 'finished'
+    || lifecycleOutcome === 'failed'
+    || lifecycleOutcome === 'userinterlude'
+    || (expectedMode === 'ralph' && lifecycleOutcome === 'blocked');
+}
+
 async function persistStatefulSkillSeedState(
   stateDir: string,
   nextSkill: SkillActiveState,
@@ -364,13 +381,16 @@ async function persistStatefulSkillSeedState(
   const sameActiveSkill = previousSkill?.skill === nextSkill.skill && previousSkill.active;
   const existingModeMatches = safeString(existingModeState?.mode).trim() === config.mode;
   const existingPhase = safeString(existingModeState?.current_phase).trim();
+  const existingModeTerminal = existingModeMatches
+    && isResettableTerminalModeState(existingModeState as Record<string, unknown>, config.mode);
   const preserveExistingModeState = existingModeMatches
     && existingPhase !== ''
+    && !existingModeTerminal
     && (
       sameActiveSkill
       || (config.mode === 'team' && existingModeState?.active === true)
     );
-  const startedAt = previousSkill?.skill === nextSkill.skill && previousSkill.active
+  const startedAt = previousSkill?.skill === nextSkill.skill && previousSkill.active && !existingModeTerminal
     ? safeString(existingModeState?.started_at).trim() || previousSkill.activated_at || nowIso
     : preserveExistingModeState
       ? safeString(existingModeState?.started_at).trim() || nowIso
@@ -399,8 +419,9 @@ async function persistStatefulSkillSeedState(
   if (config.includeIteration) {
     const defaultIteration = config.mode === 'autopilot' ? 1 : 0;
     const defaultMaxIterations = config.mode === 'autopilot' ? 10 : 50;
-    baseState.iteration = typeof existingModeState?.iteration === 'number' ? existingModeState.iteration : defaultIteration;
-    baseState.max_iterations = typeof existingModeState?.max_iterations === 'number' ? existingModeState.max_iterations : defaultMaxIterations;
+    const reusableModeState = preserveExistingModeState ? existingModeState : null;
+    baseState.iteration = typeof reusableModeState?.iteration === 'number' ? reusableModeState.iteration : defaultIteration;
+    baseState.max_iterations = typeof reusableModeState?.max_iterations === 'number' ? reusableModeState.max_iterations : defaultMaxIterations;
   }
 
   if (config.mode === 'deep-interview') {
@@ -408,13 +429,14 @@ async function persistStatefulSkillSeedState(
   }
 
   if (config.mode === 'autopilot') {
-    const existingState = (existingModeState?.state && typeof existingModeState.state === 'object')
-      ? existingModeState.state as Record<string, unknown>
+    const reusableModeState = preserveExistingModeState ? existingModeState : null;
+    const existingState = (reusableModeState?.state && typeof reusableModeState.state === 'object')
+      ? reusableModeState.state as Record<string, unknown>
       : {};
     const existingHandoffs = (existingState.handoff_artifacts && typeof existingState.handoff_artifacts === 'object')
       ? existingState.handoff_artifacts as Record<string, unknown>
       : {};
-    baseState.review_cycle = typeof existingModeState?.review_cycle === 'number' ? existingModeState.review_cycle : 0;
+    baseState.review_cycle = typeof reusableModeState?.review_cycle === 'number' ? reusableModeState.review_cycle : 0;
     baseState.state = {
       ...existingState,
       phase_cycle: Array.isArray(existingState.phase_cycle) ? existingState.phase_cycle : ['deep-interview', 'ralplan', 'ultragoal', 'code-review', 'ultraqa'],
@@ -487,9 +509,9 @@ const KEYWORD_MAP: Array<{ pattern: RegExp; skill: string; priority: number }> =
   priority: entry.priority,
 }));
 
-const KEYWORDS_REQUIRING_INTENT = new Set(['ralph', 'team', 'stop', 'abort', 'parallel', 'autoresearch', 'ultragoal']);
+const KEYWORDS_REQUIRING_INTENT = new Set(['ralph', 'team', 'stop', 'abort', 'parallel', 'autoresearch', 'ultragoal', 'autopilot']);
 
-type IntentKeyword = 'ralph' | 'team' | 'stop' | 'abort' | 'parallel' | 'autoresearch' | 'ultragoal';
+type IntentKeyword = 'ralph' | 'team' | 'stop' | 'abort' | 'parallel' | 'autoresearch' | 'ultragoal' | 'autopilot';
 
 const DEEP_INTERVIEW_ACTIVATION_PATTERNS: RegExp[] = [
   /(?:^|[^\w])\$(?:deep-interview)\b/i,
@@ -563,6 +585,13 @@ const KEYWORD_INTENT_PATTERNS: Record<IntentKeyword, RegExp[]> = {
     /^\s*\/ultragoal\b/i,
     /\b(?:use|run|start|enable|launch|invoke|activate|resume|continue)\s+(?:the\s+)?ultragoal\b/i,
     /\bultragoal\s+(?:mode|workflow|skill|loop|plan|goals?)\b/i,
+  ],
+  autopilot: [
+    /(?:^|[^\w])\$(?:autopilot)\b/i,
+    /^\s*\/autopilot\b/i,
+    /^\s*(?:please\s+)?autopilot(?:\s+(?:this|mode|workflow|skill|loop|now))?\s*[.!]?\s*$/i,
+    /\b(?:use|run|start|enable|launch|invoke|activate|resume|continue)\s+(?:the\s+)?autopilot(?:\s+(?:mode|workflow|skill|loop|now))?\s*[.!]?\s*$/i,
+    /\bautopilot\s+(?:mode|workflow|skill|loop)\b/i,
   ],
 };
 
@@ -710,6 +739,10 @@ function isNamedActiveSkillContinuationPrompt(text: string, skill: string): bool
   ).test(text.trim());
 }
 
+function isOmxQuestionAnsweredPrompt(text: string): boolean {
+  return /^\s*\[omx question answered\]/i.test(text.trim());
+}
+
 function shouldReusePreviousSkillForContinuation(
   text: string,
   previous: SkillActiveState | null,
@@ -720,7 +753,56 @@ function shouldReusePreviousSkillForContinuation(
   }
 
   return isActiveSkillContinuationPrompt(text)
-    || isNamedActiveSkillContinuationPrompt(text, previousSkill);
+    || isNamedActiveSkillContinuationPrompt(text, previousSkill)
+    || ((previousSkill === 'autopilot' || previousSkill === 'deep-interview') && isOmxQuestionAnsweredPrompt(text));
+}
+
+function isAutopilotSupervisedChildSkill(skill: string): boolean {
+  return skill === 'code-review'
+    || skill === 'ultraqa'
+    || skill === 'ralplan'
+    || skill === 'ultragoal'
+    || skill === 'deep-interview';
+}
+
+const AUTOPILOT_SUPERVISED_TRACKED_CHILD_SKILLS: TrackedWorkflowMode[] = [
+  'deep-interview',
+  'ralplan',
+  'ultragoal',
+  'ultraqa',
+];
+
+async function reconcileAutopilotSupervisedChildModeStates(
+  cwd: string,
+  stateDir: string,
+  sessionId: string | undefined,
+  childSkill: string,
+  nowIso: string,
+): Promise<string[]> {
+  if (!isTrackedWorkflowMode(childSkill)) return [];
+
+  const activeChildModes: TrackedWorkflowMode[] = [];
+  for (const mode of AUTOPILOT_SUPERVISED_TRACKED_CHILD_SKILLS) {
+    const candidatePaths = [
+      resolveSeedStateFilePath(stateDir, mode as StatefulSkillMode, sessionId).absolutePath,
+    ];
+    for (const candidatePath of candidatePaths) {
+      const existing = await readJsonStateIfExists(candidatePath);
+      if (!existing || existing.active !== true || safeString(existing.mode).trim() !== mode) continue;
+      activeChildModes.push(mode);
+      break;
+    }
+  }
+
+  const transition = await reconcileWorkflowTransition(cwd, childSkill, {
+    action: 'activate',
+    baseStateDir: stateDir,
+    currentModes: activeChildModes,
+    nowIso,
+    sessionId,
+    source: 'autopilot-supervised-child',
+  });
+  return transition.completedPaths;
 }
 
 function isDeepInterviewRuntimeConfig(value: unknown): value is DeepInterviewRuntimeConfig {
@@ -748,11 +830,14 @@ function resolveContinuationKeywordMatch(
     return fallbackMatch;
   }
 
-  if (parseExplicitSkillInvocations(normalizeWorkflowKeyboardTypos(text)).sawExplicitLikeInvocation) {
+  const markedQuestionAnswerContinuation = (previousSkill === 'autopilot' || previousSkill === 'deep-interview')
+    && isOmxQuestionAnsweredPrompt(text);
+
+  if (!markedQuestionAnswerContinuation && parseExplicitSkillInvocations(normalizeWorkflowKeyboardTypos(text)).sawExplicitLikeInvocation) {
     return fallbackMatch;
   }
 
-  if (!shouldReusePreviousSkillForContinuation(text, previous) && !safeString(fallbackMatch?.keyword).trim().startsWith('$')) {
+  if (!markedQuestionAnswerContinuation && !shouldReusePreviousSkillForContinuation(text, previous) && !safeString(fallbackMatch?.keyword).trim().startsWith('$')) {
     return fallbackMatch;
   }
 
@@ -855,7 +940,19 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
   const sameSkill = previous?.active === true && previous.skill === match.skill;
   const sameKeyword = previous?.keyword?.toLowerCase() === match.keyword.toLowerCase();
   const sameSkillContinuation = sameSkill && shouldReusePreviousSkillForContinuation(input.text, previous);
-  const preserveActivatedAt = sameSkill && (sameKeyword || sameSkillContinuation);
+  const matchedSeedConfig = STATEFUL_SKILL_SEED_CONFIG[match.skill as StatefulSkillMode];
+  const matchedModeState = matchedSeedConfig
+    ? await readJsonStateIfExists(resolveSeedStateFilePath(
+      input.stateDir,
+      matchedSeedConfig.mode,
+      input.sessionId,
+      matchedSeedConfig.scope,
+    ).absolutePath)
+    : null;
+  const matchedModeTerminal = matchedSeedConfig
+    ? isResettableTerminalModeState(matchedModeState as Record<string, unknown> | null, matchedSeedConfig.mode)
+    : false;
+  const preserveActivatedAt = sameSkill && !matchedModeTerminal && (sameKeyword || sameSkillContinuation);
   const previousEntries = listActiveSkills(previous ?? {});
   const previousWorkflowEntries = previousEntries.filter((entry) => (
     isTrackedWorkflowMode(entry.skill)
@@ -868,10 +965,13 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
 
   const isTrackedWorkflowMatch = isTrackedWorkflowMode(match.skill);
   const trackedMatchSkill = isTrackedWorkflowMatch ? match.skill : null;
+  const markedQuestionAnswerContinuation = sameSkill
+    && (match.skill === 'autopilot' || match.skill === 'deep-interview')
+    && isOmxQuestionAnsweredPrompt(input.text);
   const normalizedInputText = isTrackedWorkflowMatch
     ? normalizeWorkflowKeyboardTypos(input.text)
     : input.text;
-  const workflowMatches: TrackedWorkflowMode[] = isTrackedWorkflowMatch
+  const workflowMatches: TrackedWorkflowMode[] = isTrackedWorkflowMatch && !markedQuestionAnswerContinuation
     ? parseExplicitSkillInvocations(normalizedInputText).matches
       .map((entry) => entry.skill)
       .filter(isTrackedWorkflowMode)
@@ -893,6 +993,56 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
   const deepInterviewConfig = willActivateDeepInterview
     ? reusableDeepInterviewConfig ?? resolveDeepInterviewRuntimeConfig({ cwd: sourceCwd, text: input.text })
     : null;
+
+  if (previous?.active === true && previous.skill === 'autopilot' && isAutopilotSupervisedChildSkill(match.skill)) {
+    const nextState: SkillActiveState = {
+      ...previous,
+      version: 1,
+      active: true,
+      updated_at: nowIso,
+      source: 'keyword-detector',
+      session_id: input.sessionId ?? previous.session_id,
+      thread_id: input.threadId ?? previous.thread_id,
+      turn_id: input.turnId ?? previous.turn_id,
+      active_skills: listActiveSkills(previous).map((entry) => (
+        entry.skill === 'autopilot'
+          ? {
+              ...entry,
+              active: true,
+              updated_at: nowIso,
+              session_id: input.sessionId ?? entry.session_id,
+              thread_id: input.threadId ?? entry.thread_id,
+              turn_id: input.turnId ?? entry.turn_id,
+            }
+          : entry
+      )),
+      supervised_child_keyword: match.keyword,
+      supervised_child_skill: match.skill,
+    };
+    try {
+      await reconcileAutopilotSupervisedChildModeStates(sourceCwd, input.stateDir, input.sessionId ?? previous.session_id, match.skill, nowIso);
+      await writeSkillActiveStateCopiesForStateDir(
+        input.stateDir,
+        nextState,
+        input.sessionId,
+        selectRootSkillStateCopy(previousRoot, nextState, input.sessionId),
+      );
+    } catch (error) {
+      return {
+        ...previous,
+        version: 1,
+        active: true,
+        updated_at: nowIso,
+        source: 'keyword-detector',
+        session_id: input.sessionId ?? previous.session_id,
+        thread_id: input.threadId ?? previous.thread_id,
+        turn_id: input.turnId ?? previous.turn_id,
+        active_skills: listActiveSkills(previous),
+        transition_error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    return nextState;
+  }
 
   if (isTrackedWorkflowMatch) {
     let nextWorkflowEntries = previousWorkflowEntries.map((entry) => ({ ...entry }));
@@ -927,17 +1077,38 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
       }
 
       if (decision.autoCompleteModes.length > 0) {
-        const transition = await reconcileWorkflowTransition(
-          sourceCwd,
-          requestedMode,
-          {
-            action: 'activate',
-            sessionId: input.sessionId,
+        let transition: Awaited<ReturnType<typeof reconcileWorkflowTransition>>;
+        try {
+          transition = await reconcileWorkflowTransition(
+            sourceCwd,
+            requestedMode,
+            {
+              action: 'activate',
+              sessionId: input.sessionId,
+              source: 'keyword-detector',
+              baseStateDir: input.stateDir,
+              currentModes: nextWorkflowEntries.map((entry) => entry.skill),
+            },
+          );
+        } catch (error) {
+          return {
+            ...(previous ?? {}),
+            version: 1,
+            active: previous?.active ?? nextWorkflowEntries.length > 0,
+            skill: previous?.skill || match.skill,
+            keyword: previous?.keyword || match.keyword,
+            phase: previous?.phase || initialWorkflowPhaseForMode(trackedMatchSkill as TrackedWorkflowMode),
+            activated_at: previous?.activated_at || nowIso,
+            updated_at: nowIso,
             source: 'keyword-detector',
-            baseStateDir: input.stateDir,
-            currentModes: nextWorkflowEntries.map((entry) => entry.skill),
-          },
-        );
+            session_id: input.sessionId ?? previous?.session_id,
+            thread_id: input.threadId ?? previous?.thread_id,
+            turn_id: input.turnId ?? previous?.turn_id,
+            active_skills: previousEntries,
+            ...(previous?.input_lock ? { input_lock: previous.input_lock } : {}),
+            transition_error: error instanceof Error ? error.message : String(error),
+          };
+        }
         if (transition.transitionMessage) {
           transitionMessages.push(transition.transitionMessage);
         }
@@ -950,7 +1121,7 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
 
       const existingEntry = nextWorkflowEntries.find((entry) => entry.skill === requestedMode);
       if (existingEntry) {
-        existingEntry.phase = requestedMode === match.skill && !sameSkill
+        existingEntry.phase = requestedMode === match.skill && (!sameSkill || matchedModeTerminal)
           ? initialWorkflowPhaseForMode(requestedMode)
           : existingEntry.phase;
         existingEntry.active = true;
@@ -1187,6 +1358,7 @@ export function isUnderspecifiedForExecution(text: string): boolean {
 export interface ApplyRalplanGateOptions {
   cwd?: string;
   priorSkill?: string | null;
+  requireNativeSubagents?: boolean;
 }
 
 export function applyRalplanGate(
@@ -1220,7 +1392,9 @@ export function applyRalplanGate(
   }
 
   const planningComplete = isPlanningComplete(readPlanningArtifacts(options.cwd ?? process.cwd()));
-  const consensusComplete = hasDurableRalplanConsensusEvidenceForCwd(options.cwd ?? process.cwd());
+  const consensusComplete = hasDurableRalplanConsensusEvidenceForCwd(options.cwd ?? process.cwd(), {
+    requireNativeSubagents: options.requireNativeSubagents,
+  });
   const shortFollowupBypasses = executionKeywords.filter((keyword) => {
     if (keyword !== 'team' && keyword !== 'ralph') return false;
     return isApprovedExecutionFollowupShortcut(

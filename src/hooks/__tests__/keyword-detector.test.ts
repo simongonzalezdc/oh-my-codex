@@ -162,6 +162,31 @@ describe('keyword detector team compatibility', () => {
     assert.notEqual(pathOnly?.skill, 'ultragoal');
   });
 
+  it('maps bare and command-style autopilot invocations to autopilot', () => {
+    for (const prompt of ['autopilot', 'run autopilot', 'autopilot this', 'autopilot mode']) {
+      const match = detectPrimaryKeyword(prompt);
+      assert.ok(match, `expected autopilot match for ${prompt}`);
+      assert.equal(match.skill, 'autopilot');
+      assert.equal(match.keyword.toLowerCase(), 'autopilot');
+    }
+  });
+
+  it('does not trigger autopilot from management/debug prose mentions', () => {
+    assert.equal(detectPrimaryKeyword('inspect autopilot state before continuing'), null);
+    assert.equal(detectPrimaryKeyword('fix the autopilot bug in the detector'), null);
+    assert.equal(detectPrimaryKeyword('why did autopilot fail?'), null);
+    assert.equal(detectPrimaryKeyword('run autopilot tests'), null);
+    assert.equal(detectPrimaryKeyword('run autopilot regression tests'), null);
+    assert.equal(detectPrimaryKeyword('continue autopilot debugging'), null);
+    assert.equal(detectPrimaryKeyword('start autopilot bug investigation'), null);
+  });
+
+  it('keeps higher-priority workflow keywords ahead of autopilot mentions', () => {
+    const match = detectPrimaryKeyword('autopilot this after consensus plan');
+    assert.ok(match);
+    assert.equal(match.skill, 'ralplan');
+  });
+
   it('maps code-review keyword variants to code-review skill', () => {
     const hyphen = detectPrimaryKeyword('run $code-review before merge');
     assert.ok(hyphen);
@@ -416,6 +441,7 @@ describe('keyword registry coverage', () => {
     assert.ok(registryKeywords.has('$ultragoal'));
     assert.ok(registryKeywords.has('$prometheus-strict'));
     assert.ok(registryKeywords.has('ultragoal'));
+    assert.ok(registryKeywords.has('autopilot'));
   });
 });
 
@@ -618,6 +644,173 @@ describe('keyword detector skill-active-state lifecycle', () => {
       assert.equal(modeState.state.return_to_ralplan_reason, null);
     } finally {
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+
+  it('fully resets terminal Autopilot mode state when reactivated', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-autopilot-terminal-reset-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-autopilot-terminal-reset';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      await writeFile(join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE), JSON.stringify({
+        version: 1,
+        active: true,
+        skill: 'autopilot',
+        keyword: '$autopilot',
+        phase: 'complete',
+        activated_at: '2026-05-29T00:00:00.000Z',
+        updated_at: '2026-05-29T00:00:00.000Z',
+        session_id: sessionId,
+        active_skills: [{ skill: 'autopilot', active: true, phase: 'complete', session_id: sessionId }],
+      }, null, 2));
+      await writeFile(join(stateDir, 'sessions', sessionId, 'autopilot-state.json'), JSON.stringify({
+        active: true,
+        mode: 'autopilot',
+        current_phase: 'complete',
+        started_at: '2026-05-29T00:00:00.000Z',
+        completed_at: '2026-05-29T00:10:00.000Z',
+        iteration: 10,
+        max_iterations: 10,
+        review_cycle: 3,
+        lifecycle_outcome: 'finished',
+        run_outcome: 'finish',
+        handoff_artifacts: {
+          code_review: { verdict: 'APPROVE / CLEAR' },
+          ultraqa: { verdict: 'pass' },
+        },
+        state: {
+          handoff_artifacts: {
+            ralplan_consensus_gate: { complete: false },
+            code_review: { verdict: 'stale' },
+          },
+        },
+      }, null, 2));
+
+      const result = await recordSkillActivation({
+        stateDir,
+        text: '$autopilot investigate the next issue',
+        sessionId,
+        threadId: 'thread-reactivated',
+        turnId: 'turn-reactivated',
+        nowIso: '2026-05-30T00:00:00.000Z',
+      });
+
+      assert.ok(result);
+      assert.equal(result.skill, 'autopilot');
+      assert.equal(result.phase, 'deep-interview');
+      assert.equal(result.activated_at, '2026-05-30T00:00:00.000Z');
+      assert.equal(result.active_skills?.[0]?.phase, 'deep-interview');
+      assert.equal(result.active_skills?.[0]?.activated_at, '2026-05-30T00:00:00.000Z');
+      const skillState = JSON.parse(await readFile(join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE), 'utf-8')) as {
+        phase?: string;
+        activated_at?: string;
+        active_skills?: Array<{ phase?: string; activated_at?: string }>;
+      };
+      assert.equal(skillState.phase, 'deep-interview');
+      assert.equal(skillState.activated_at, '2026-05-30T00:00:00.000Z');
+      assert.equal(skillState.active_skills?.[0]?.phase, 'deep-interview');
+      assert.equal(skillState.active_skills?.[0]?.activated_at, '2026-05-30T00:00:00.000Z');
+      const modeState = JSON.parse(await readFile(join(stateDir, 'sessions', sessionId, 'autopilot-state.json'), 'utf-8')) as {
+        active?: boolean;
+        current_phase?: string;
+        started_at?: string;
+        completed_at?: string;
+        iteration?: number;
+        max_iterations?: number;
+        review_cycle?: number;
+        lifecycle_outcome?: string;
+        run_outcome?: string;
+        handoff_artifacts?: Record<string, unknown>;
+        state?: { handoff_artifacts?: Record<string, unknown> };
+      };
+      assert.equal(modeState.active, true);
+      assert.equal(modeState.current_phase, 'deep-interview');
+      assert.equal(modeState.started_at, '2026-05-30T00:00:00.000Z');
+      assert.equal(modeState.completed_at, undefined);
+      assert.equal(modeState.iteration, 1);
+      assert.equal(modeState.max_iterations, 10);
+      assert.equal(modeState.review_cycle, 0);
+      assert.equal(modeState.lifecycle_outcome, undefined);
+      assert.equal(modeState.run_outcome, undefined);
+      assert.equal(modeState.handoff_artifacts, undefined);
+      assert.deepEqual(modeState.state?.handoff_artifacts, {
+        deep_interview: null,
+        ralplan: null,
+        ralplan_consensus_gate: {
+          required: true,
+          sequence: ['architect-review', 'critic-review'],
+          planning_artifacts_are_not_consensus: true,
+          required_review_roles: ['architect', 'critic'],
+          ralplan_architect_review: null,
+          ralplan_critic_review: null,
+          complete: false,
+        },
+        ultragoal: null,
+        code_review: null,
+        ultraqa: null,
+      });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+
+  it('resets stopped Autopilot mode state when reactivated', async () => {
+    for (const phase of ['stopped', 'user-stopped']) {
+      const cwd = await mkdtemp(join(tmpdir(), `omx-keyword-autopilot-${phase}-reset-`));
+      const stateDir = join(cwd, '.omx', 'state');
+      const sessionId = `sess-autopilot-${phase}-reset`;
+      try {
+        await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+        await writeFile(join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE), JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase,
+          activated_at: '2026-05-29T00:00:00.000Z',
+          updated_at: '2026-05-29T00:00:00.000Z',
+          source: 'keyword-detector',
+          session_id: sessionId,
+          active_skills: [{ skill: 'autopilot', active: true, phase, session_id: sessionId }],
+        }, null, 2));
+        await writeFile(join(stateDir, 'sessions', sessionId, 'autopilot-state.json'), JSON.stringify({
+          active: true,
+          mode: 'autopilot',
+          current_phase: phase,
+          started_at: '2026-05-29T00:00:00.000Z',
+          completed_at: '2026-05-29T00:10:00.000Z',
+          iteration: 10,
+          max_iterations: 10,
+          review_cycle: 3,
+          state: { handoff_artifacts: { code_review: { verdict: 'stale' } } },
+        }, null, 2));
+
+        const result = await recordSkillActivation({
+          stateDir,
+          text: '$autopilot new task after stop',
+          sessionId,
+          nowIso: '2026-05-30T00:00:00.000Z',
+        });
+
+        assert.ok(result);
+        assert.equal(result.phase, 'deep-interview');
+        assert.equal(result.activated_at, '2026-05-30T00:00:00.000Z');
+        const modeState = JSON.parse(await readFile(join(stateDir, 'sessions', sessionId, 'autopilot-state.json'), 'utf-8')) as {
+          current_phase?: string;
+          iteration?: number;
+          review_cycle?: number;
+          state?: { handoff_artifacts?: { code_review?: unknown } };
+        };
+        assert.equal(modeState.current_phase, 'deep-interview');
+        assert.equal(modeState.iteration, 1);
+        assert.equal(modeState.review_cycle, 0);
+        assert.equal(modeState.state?.handoff_artifacts?.code_review, null);
+      } finally {
+        await rm(cwd, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1069,7 +1262,7 @@ describe('keyword detector skill-active-state lifecycle', () => {
     }
   });
 
-  it('keeps ralplan as an allowlisted deep-interview forward handoff', async () => {
+  it('denies ralplan handoff from deep-interview without completion or explicit skip evidence', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-ralplan-handoff-'));
     const stateDir = join(cwd, '.omx', 'state');
     try {
@@ -1097,11 +1290,60 @@ describe('keyword detector skill-active-state lifecycle', () => {
         nowIso: '2026-04-10T00:00:00.000Z',
       });
 
+      assert.equal(result?.skill, 'deep-interview');
+      assert.match(String(result?.transition_error), /missing deep-interview completion\/skip gate/i);
+      const preserved = JSON.parse(
+        await readFile(join(stateDir, 'sessions', 'sess-ralplan-handoff', 'deep-interview-state.json'), 'utf-8'),
+      ) as { active?: boolean; current_phase?: string };
+      assert.equal(preserved.active, true);
+      assert.equal(preserved.current_phase, 'intent-first');
+      assert.equal(existsSync(join(stateDir, 'sessions', 'sess-ralplan-handoff', 'ralplan-state.json')), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('allows ralplan handoff from deep-interview with a durable completion gate', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-ralplan-handoff-complete-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    try {
+      await mkdir(join(stateDir, 'sessions', 'sess-ralplan-handoff-complete'), { recursive: true });
+      await writeFile(
+        join(stateDir, 'sessions', 'sess-ralplan-handoff-complete', SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'deep-interview',
+          phase: 'planning',
+          session_id: 'sess-ralplan-handoff-complete',
+          active_skills: [{ skill: 'deep-interview', phase: 'planning', active: true, session_id: 'sess-ralplan-handoff-complete' }],
+        }, null, 2),
+      );
+      await writeFile(
+        join(stateDir, 'sessions', 'sess-ralplan-handoff-complete', 'deep-interview-state.json'),
+        JSON.stringify({
+          active: true,
+          mode: 'deep-interview',
+          current_phase: 'intent-first',
+          deep_interview_gate: {
+            status: 'complete',
+            rationale: 'Requirements are clarified and ready for ralplan consensus.',
+          },
+        }, null, 2),
+      );
+
+      const result = await recordSkillActivation({
+        stateDir,
+        text: '$ralplan implement the approved contract',
+        sessionId: 'sess-ralplan-handoff-complete',
+        nowIso: '2026-04-10T00:00:00.000Z',
+      });
+
       assert.equal(result?.transition_error, undefined);
       assert.equal(result?.skill, 'ralplan');
       assert.equal(result?.transition_message, 'mode transiting: deep-interview -> ralplan');
       const completed = JSON.parse(
-        await readFile(join(stateDir, 'sessions', 'sess-ralplan-handoff', 'deep-interview-state.json'), 'utf-8'),
+        await readFile(join(stateDir, 'sessions', 'sess-ralplan-handoff-complete', 'deep-interview-state.json'), 'utf-8'),
       ) as { active?: boolean; current_phase?: string };
       assert.equal(completed.active, false);
       assert.equal(completed.current_phase, 'completed');
@@ -1268,6 +1510,71 @@ describe('keyword detector skill-active-state lifecycle', () => {
       assert.equal(modeState.team_name, 'review-team');
       assert.equal(modeState.session_id, 'sess-team-root');
       assert.equal(existsSync(join(stateDir, 'sessions', 'sess-team-followup', 'team-state.json')), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('emits terminal ralplan state before explicit ultragoal execution handoff', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-ralplan-ultragoal-handoff-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    try {
+      await mkdir(join(stateDir, 'sessions', 'sess-ralplan-ultragoal'), { recursive: true });
+      await writeFile(
+        join(stateDir, 'sessions', 'sess-ralplan-ultragoal', SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'ralplan',
+          keyword: '$ralplan',
+          phase: 'planning',
+          session_id: 'sess-ralplan-ultragoal',
+          active_skills: [{ skill: 'ralplan', phase: 'planning', active: true, session_id: 'sess-ralplan-ultragoal' }],
+        }, null, 2),
+      );
+      await writeFile(
+        join(stateDir, 'sessions', 'sess-ralplan-ultragoal', 'ralplan-state.json'),
+        JSON.stringify({
+          active: true,
+          mode: 'ralplan',
+          current_phase: 'complete',
+          planning_complete: true,
+          ralplan_consensus_gate: {
+            complete: true,
+            sequence: ['architect-review', 'critic-review'],
+            ralplan_architect_review: { agent_role: 'architect', verdict: 'approve', approved: true },
+            ralplan_critic_review: { agent_role: 'critic', verdict: 'approve', approved: true },
+          },
+        }, null, 2),
+      );
+
+      const result = await recordSkillActivation({
+        stateDir,
+        sourceCwd: cwd,
+        text: '$ultragoal execute the approved ralplan',
+        sessionId: 'sess-ralplan-ultragoal',
+        nowIso: '2026-04-10T00:20:00.000Z',
+      });
+
+      assert.equal(result?.transition_error, undefined);
+      assert.equal(result?.skill, 'ultragoal');
+      assert.equal(result?.transition_message, 'mode transiting: ralplan -> ultragoal');
+      assert.deepEqual(result?.active_skills?.map((entry) => entry.skill), ['ultragoal']);
+
+      const ralplan = JSON.parse(
+        await readFile(join(stateDir, 'sessions', 'sess-ralplan-ultragoal', 'ralplan-state.json'), 'utf-8'),
+      ) as { active?: boolean; current_phase?: string; completed_at?: string; auto_completed_reason?: string };
+      assert.equal(ralplan.active, false);
+      assert.equal(ralplan.current_phase, 'completed');
+      assert.equal(ralplan.auto_completed_reason, 'mode transiting: ralplan -> ultragoal');
+      assert.ok(ralplan.completed_at);
+
+      const ultragoal = JSON.parse(
+        await readFile(join(stateDir, 'sessions', 'sess-ralplan-ultragoal', 'ultragoal-state.json'), 'utf-8'),
+      ) as { active?: boolean; mode?: string; current_phase?: string };
+      assert.equal(ultragoal.active, true);
+      assert.equal(ultragoal.mode, 'ultragoal');
+      assert.equal(ultragoal.current_phase, 'planning');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -1904,6 +2211,258 @@ deepMaxRounds = 21
     }
   });
 
+  it('keeps Autopilot visible when a supervised code-review child keyword appears', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-autopilot-child-code-review-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-autopilot-child-code-review';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase: 'ralplan',
+          activated_at: '2026-05-30T00:00:00.000Z',
+          updated_at: '2026-05-30T00:01:00.000Z',
+          source: 'keyword-detector',
+          session_id: sessionId,
+          active_skills: [{ skill: 'autopilot', phase: 'ralplan', active: true, session_id: sessionId }],
+        }, null, 2),
+      );
+
+      const result = await recordSkillActivation({
+        stateDir,
+        text: 'CODE REVIEW the current diff before continuing',
+        sessionId,
+        threadId: 'thread-autopilot-child-code-review',
+        turnId: 'turn-autopilot-child-code-review',
+        nowIso: '2026-05-30T00:02:00.000Z',
+      });
+
+      assert.ok(result);
+      assert.equal(result.skill, 'autopilot');
+      assert.equal(result.phase, 'ralplan');
+      assert.equal(result.supervised_child_skill, 'code-review');
+      const persisted = JSON.parse(
+        await readFile(join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE), 'utf-8'),
+      ) as { skill?: string; phase?: string; active_skills?: Array<{ skill?: string }> };
+      assert.equal(persisted.skill, 'autopilot');
+      assert.equal(persisted.phase, 'ralplan');
+      assert.deepEqual(persisted.active_skills?.map((entry) => entry.skill), ['autopilot']);
+      assert.equal(existsSync(join(stateDir, 'sessions', sessionId, 'code-review-state.json')), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps tracked Autopilot child keywords supervised and completes stale child mode state', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-autopilot-child-ultraqa-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-autopilot-child-ultraqa';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase: 'ultraqa',
+          activated_at: '2026-05-30T00:00:00.000Z',
+          updated_at: '2026-05-30T00:01:00.000Z',
+          source: 'keyword-detector',
+          session_id: sessionId,
+          active_skills: [{ skill: 'autopilot', phase: 'ultraqa', active: true, session_id: sessionId }],
+        }, null, 2),
+      );
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, 'ultragoal-state.json'),
+        JSON.stringify({
+          active: true,
+          mode: 'ultragoal',
+          current_phase: 'planning',
+          session_id: sessionId,
+          started_at: '2026-05-29T23:00:00.000Z',
+          updated_at: '2026-05-29T23:05:00.000Z',
+        }, null, 2),
+      );
+
+      const result = await recordSkillActivation({
+        stateDir,
+        text: '$ultraqa run adversarial checks',
+        sessionId,
+        threadId: 'thread-autopilot-child-ultraqa',
+        turnId: 'turn-autopilot-child-ultraqa',
+        nowIso: '2026-05-30T00:02:00.000Z',
+      });
+
+      assert.ok(result);
+      assert.equal(result.skill, 'autopilot');
+      assert.equal(result.phase, 'ultraqa');
+      assert.equal(result.supervised_child_skill, 'ultraqa');
+      assert.equal(result.transition_error, undefined);
+      assert.equal(existsSync(join(stateDir, 'sessions', sessionId, 'ultraqa-state.json')), false);
+      const ultragoal = JSON.parse(
+        await readFile(join(stateDir, 'sessions', sessionId, 'ultragoal-state.json'), 'utf-8'),
+      ) as { active?: boolean; current_phase?: string; auto_completed_reason?: string };
+      assert.equal(ultragoal.active, false);
+      assert.equal(ultragoal.current_phase, 'completed');
+      assert.match(ultragoal.auto_completed_reason || '', /mode transiting: ultragoal -> ultraqa/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('denies supervised Autopilot child rollback without clearing stale execution state', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-autopilot-child-rollback-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-autopilot-child-rollback';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase: 'ultragoal',
+          session_id: sessionId,
+          active_skills: [{ skill: 'autopilot', phase: 'ultragoal', active: true, session_id: sessionId }],
+        }, null, 2),
+      );
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, 'ultragoal-state.json'),
+        JSON.stringify({
+          active: true,
+          mode: 'ultragoal',
+          current_phase: 'executing',
+          session_id: sessionId,
+        }, null, 2),
+      );
+
+      const result = await recordSkillActivation({
+        stateDir,
+        text: '$deep-interview go back and re-plan',
+        sessionId,
+        nowIso: '2026-05-30T00:03:00.000Z',
+      });
+
+      assert.equal(result?.skill, 'autopilot');
+      assert.match(String(result?.transition_error), /Execution-to-planning rollback auto-complete is not allowed/i);
+      assert.equal(result?.supervised_child_skill, undefined);
+      assert.equal(existsSync(join(stateDir, 'sessions', sessionId, 'deep-interview-state.json')), false);
+      const ultragoal = JSON.parse(
+        await readFile(join(stateDir, 'sessions', sessionId, 'ultragoal-state.json'), 'utf-8'),
+      ) as { active?: boolean; current_phase?: string };
+      assert.equal(ultragoal.active, true);
+      assert.equal(ultragoal.current_phase, 'executing');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces supervised Autopilot deep-interview to ralplan gate failures', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-autopilot-child-gate-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-autopilot-child-gate';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase: 'deep-interview',
+          session_id: sessionId,
+          active_skills: [{ skill: 'autopilot', phase: 'deep-interview', active: true, session_id: sessionId }],
+        }, null, 2),
+      );
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, 'deep-interview-state.json'),
+        JSON.stringify({
+          active: true,
+          mode: 'deep-interview',
+          current_phase: 'intent-first',
+          session_id: sessionId,
+        }, null, 2),
+      );
+
+      const result = await recordSkillActivation({
+        stateDir,
+        text: '$ralplan continue without interview completion evidence',
+        sessionId,
+        nowIso: '2026-05-30T00:04:00.000Z',
+      });
+
+      assert.equal(result?.skill, 'autopilot');
+      assert.match(String(result?.transition_error), /missing deep-interview completion\/skip gate/i);
+      assert.equal(result?.supervised_child_skill, undefined);
+      assert.equal(existsSync(join(stateDir, 'sessions', sessionId, 'ralplan-state.json')), false);
+      const deepInterview = JSON.parse(
+        await readFile(join(stateDir, 'sessions', sessionId, 'deep-interview-state.json'), 'utf-8'),
+      ) as { active?: boolean; current_phase?: string };
+      assert.equal(deepInterview.active, true);
+      assert.equal(deepInterview.current_phase, 'intent-first');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores stale root child mode state during session-scoped Autopilot child reconciliation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-autopilot-child-session-root-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-autopilot-child-session-root';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase: 'deep-interview',
+          session_id: sessionId,
+          active_skills: [{ skill: 'autopilot', phase: 'deep-interview', active: true, session_id: sessionId }],
+        }, null, 2),
+      );
+      await writeFile(
+        join(stateDir, 'ultragoal-state.json'),
+        JSON.stringify({
+          active: true,
+          mode: 'ultragoal',
+          current_phase: 'executing',
+        }, null, 2),
+      );
+
+      const result = await recordSkillActivation({
+        stateDir,
+        text: '$deep-interview continue scoped interview',
+        sessionId,
+        nowIso: '2026-05-30T00:05:00.000Z',
+      });
+
+      assert.equal(result?.skill, 'autopilot');
+      assert.equal(result?.supervised_child_skill, 'deep-interview');
+      assert.equal(result?.transition_error, undefined);
+      const rootUltragoal = JSON.parse(
+        await readFile(join(stateDir, 'ultragoal-state.json'), 'utf-8'),
+      ) as { active?: boolean; current_phase?: string };
+      assert.equal(rootUltragoal.active, true);
+      assert.equal(rootUltragoal.current_phase, 'executing');
+      assert.equal(existsSync(join(stateDir, 'sessions', sessionId, 'deep-interview-state.json')), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('records ultragoal as a prompt skill with first-class mode state', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-ultragoal-'));
     const stateDir = join(cwd, '.omx', 'state');
@@ -1933,21 +2492,29 @@ deepMaxRounds = 21
   });
 
   it('emits a warning when skill-active-state persistence fails', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-persist-fail-'));
     const warnings: unknown[][] = [];
     mock.method(console, 'warn', (...args: unknown[]) => {
       warnings.push(args);
     });
 
-    const result = await recordSkillActivation({
-      stateDir: join('/definitely-missing', 'nested', 'state-dir'),
-        text: 'please run $autopilot',
-      nowIso: '2026-02-25T00:00:00.000Z',
-    });
+    try {
+      const blockingFile = join(cwd, 'state-root-file');
+      await writeFile(blockingFile, 'not a directory');
 
-    assert.ok(result);
-    assert.equal(result.skill, 'autopilot');
-    assert.equal(warnings.length, 1);
-    assert.match(String(warnings[0][0]), /failed to persist keyword activation state/);
+      const result = await recordSkillActivation({
+        stateDir: join(blockingFile, 'nested', 'state-dir'),
+        text: 'please run $autopilot',
+        nowIso: '2026-02-25T00:00:00.000Z',
+      });
+
+      assert.ok(result);
+      assert.equal(result.skill, 'autopilot');
+      assert.equal(warnings.length, 1);
+      assert.match(String(warnings[0][0]), /failed to persist keyword activation state/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it('preserves activated_at for same-skill continuation', async () => {
@@ -2260,6 +2827,178 @@ deepMaxRounds = 21
       assert.equal(existsSync(join(stateDir, 'sessions', 'sess-autopilot-bare', 'ralph-state.json')), false);
     } finally {
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+
+  it('preserves active Autopilot question-wait state on bare continuation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-autopilot-question-wait-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    const sessionId = 'sess-autopilot-question-wait';
+    try {
+      await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'autopilot',
+          keyword: '$autopilot',
+          phase: 'waiting-for-user',
+          activated_at: '2026-04-19T00:00:00.000Z',
+          updated_at: '2026-04-19T00:10:00.000Z',
+          source: 'keyword-detector',
+          session_id: sessionId,
+          active_skills: [
+            {
+              skill: 'autopilot',
+              phase: 'waiting-for-user',
+              active: true,
+              activated_at: '2026-04-19T00:00:00.000Z',
+              updated_at: '2026-04-19T00:10:00.000Z',
+              session_id: sessionId,
+            },
+          ],
+        }, null, 2),
+      );
+      await writeFile(
+        join(stateDir, 'sessions', sessionId, 'autopilot-state.json'),
+        JSON.stringify({
+          active: true,
+          mode: 'autopilot',
+          current_phase: 'waiting-for-user',
+          started_at: '2026-04-19T00:00:00.000Z',
+          updated_at: '2026-04-19T00:10:00.000Z',
+          session_id: sessionId,
+          iteration: 4,
+          max_iterations: 10,
+          review_cycle: 2,
+          run_outcome: 'blocked_on_user',
+          lifecycle_outcome: 'askuserQuestion',
+          state: {
+            deep_interview_question: {
+              status: 'waiting_for_user',
+              obligation_id: 'obligation-question-wait',
+              previous_phase: 'deep-interview',
+            },
+          },
+        }, null, 2),
+      );
+
+      const result = await recordSkillActivation({
+        stateDir,
+        text: '\\ keep going now',
+        sessionId,
+        nowIso: '2026-04-19T00:15:00.000Z',
+      });
+
+      assert.ok(result);
+      assert.equal(result.skill, 'autopilot');
+      const modeState = JSON.parse(
+        await readFile(join(stateDir, 'sessions', sessionId, 'autopilot-state.json'), 'utf-8'),
+      ) as {
+        current_phase?: string;
+        iteration?: number;
+        max_iterations?: number;
+        review_cycle?: number;
+        lifecycle_outcome?: string;
+        state?: { deep_interview_question?: { obligation_id?: string; status?: string } };
+      };
+      assert.equal(modeState.current_phase, 'waiting-for-user');
+      assert.equal(modeState.iteration, 4);
+      assert.equal(modeState.max_iterations, 10);
+      assert.equal(modeState.review_cycle, 2);
+      assert.equal(modeState.lifecycle_outcome, 'askuserQuestion');
+      assert.equal(modeState.state?.deep_interview_question?.status, 'waiting_for_user');
+      assert.equal(modeState.state?.deep_interview_question?.obligation_id, 'obligation-question-wait');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+
+  it('resets terminal Ralph blocked_on_user state when reactivated', async () => {
+    const cases = [
+      { name: 'phase', phase: 'blocked_on_user', run_outcome: undefined },
+      { name: 'outcome', phase: 'executing', run_outcome: 'blocked_on_user' },
+    ];
+
+    for (const testCase of cases) {
+      const cwd = await mkdtemp(join(tmpdir(), `omx-keyword-state-ralph-terminal-${testCase.name}-reactivation-`));
+      const stateDir = join(cwd, '.omx', 'state');
+      const sessionId = `sess-ralph-terminal-${testCase.name}`;
+      try {
+        await mkdir(join(stateDir, 'sessions', sessionId), { recursive: true });
+        await writeFile(
+          join(stateDir, 'sessions', sessionId, SKILL_ACTIVE_STATE_FILE),
+          JSON.stringify({
+            version: 1,
+            active: true,
+            skill: 'ralph',
+            keyword: '$ralph',
+            phase: testCase.phase,
+            activated_at: '2026-04-19T00:00:00.000Z',
+            updated_at: '2026-04-19T00:10:00.000Z',
+            source: 'keyword-detector',
+            session_id: sessionId,
+            active_skills: [
+              {
+                skill: 'ralph',
+                phase: testCase.phase,
+                active: true,
+                activated_at: '2026-04-19T00:00:00.000Z',
+                updated_at: '2026-04-19T00:10:00.000Z',
+                session_id: sessionId,
+              },
+            ],
+          }, null, 2),
+        );
+        await writeFile(
+          join(stateDir, 'sessions', sessionId, 'ralph-state.json'),
+          JSON.stringify({
+            active: false,
+            mode: 'ralph',
+            current_phase: testCase.phase,
+            started_at: '2026-04-19T00:00:00.000Z',
+            completed_at: '2026-04-19T00:10:00.000Z',
+            iteration: 50,
+            max_iterations: 50,
+            ...(testCase.run_outcome ? { run_outcome: testCase.run_outcome } : {}),
+          }, null, 2),
+        );
+
+        const result = await recordSkillActivation({
+          stateDir,
+          text: '\\ keep going now',
+          sessionId,
+          nowIso: '2026-04-19T00:15:00.000Z',
+        });
+
+        assert.ok(result);
+        assert.equal(result.skill, 'ralph');
+        assert.equal(result.phase, 'planning');
+        assert.equal(result.activated_at, '2026-04-19T00:15:00.000Z');
+        assert.equal(result.active_skills?.[0]?.phase, 'planning');
+        assert.equal(result.active_skills?.[0]?.activated_at, '2026-04-19T00:15:00.000Z');
+        const modeState = JSON.parse(
+          await readFile(join(stateDir, 'sessions', sessionId, 'ralph-state.json'), 'utf-8'),
+        ) as {
+          active?: boolean;
+          current_phase?: string;
+          started_at?: string;
+          completed_at?: string;
+          iteration?: number;
+          max_iterations?: number;
+        };
+        assert.equal(modeState.active, true);
+        assert.equal(modeState.current_phase, 'starting');
+        assert.equal(modeState.started_at, '2026-04-19T00:15:00.000Z');
+        assert.equal(modeState.completed_at, undefined);
+        assert.equal(modeState.iteration, 0);
+        assert.equal(modeState.max_iterations, 50);
+      } finally {
+        await rm(cwd, { recursive: true, force: true });
+      }
     }
   });
 
@@ -2613,6 +3352,47 @@ describe('applyRalplanGate', () => {
       const result = applyRalplanGate(['team'], 'team으로 해줘', { cwd });
       assert.equal(result.gateApplied, false);
       assert.deepEqual(result.keywords, ['team']);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps native-proof execution follow-ups gated when consensus is artifact-only', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-gate-native-required-'));
+    try {
+      const plansDir = join(cwd, '.omx', 'plans');
+      const stateDir = join(cwd, '.omx', 'state');
+      await mkdir(plansDir, { recursive: true });
+      await mkdir(stateDir, { recursive: true });
+      await writeFile(
+        join(plansDir, 'prd-issue-833.md'),
+        '# Approved plan\n\nLaunch hint: omx team 3:executor "Execute approved issue 833 plan"\n',
+      );
+      await writeFile(join(plansDir, 'test-spec-issue-833.md'), '# Test spec\n');
+      await writeFile(join(stateDir, 'ralplan-state.json'), JSON.stringify({
+        current_phase: 'complete',
+        planning_complete: true,
+        ralplan_consensus_gate: {
+          complete: true,
+          sequence: ['architect-review', 'critic-review'],
+          ralplan_architect_review: {
+            agent_role: 'architect',
+            verdict: 'approve',
+            iteration: 1,
+            provenance_kind: 'codex_exec',
+          },
+          ralplan_critic_review: {
+            agent_role: 'critic',
+            verdict: 'approve',
+            iteration: 1,
+            provenance_kind: 'codex_exec',
+          },
+        },
+      }));
+
+      const result = applyRalplanGate(['team'], 'team', { cwd, requireNativeSubagents: true });
+      assert.equal(result.gateApplied, true);
+      assert.deepEqual(result.keywords, ['ralplan']);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

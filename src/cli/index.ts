@@ -128,6 +128,7 @@ import { cleanCodexModelAvailabilityNuxIfNeeded, extractSharedMcpRegistryServers
 import type { UnifiedMcpRegistryServer } from "../config/mcp-registry.js";
 import { OMX_FIRST_PARTY_MCP_SERVER_NAMES } from "../config/omx-first-party-mcp.js";
 import { HUD_TMUX_HEIGHT_LINES } from "../hud/constants.js";
+import { readUltragoalState } from "../hud/state.js";
 import { OMX_TMUX_HUD_OWNER_ENV } from "../hud/reconcile.js";
 import {
   createHudWatchPane as createSharedHudWatchPane,
@@ -138,6 +139,7 @@ import {
   parsePaneIdFromTmuxOutput,
   reapDeadHudPanes,
   registerHudResizeHook,
+  resizeTmuxPane,
 } from "../hud/tmux.js";
 
 export { parseTmuxPaneSnapshot, isHudWatchPane, findHudWatchPaneIds } from "../hud/tmux.js";
@@ -878,6 +880,96 @@ function execTmuxFileSync(
   }) as string;
 }
 
+export const DETACHED_TMUX_HISTORY_LIMIT = 500;
+const TMUX_HOOK_INDEX_MAX = 1_000_000;
+
+function setDetachedTmuxSessionHistoryLimit(
+  sessionName: string,
+  leaderPaneId?: string | null,
+): void {
+  const boundedHistoryLimit = String(DETACHED_TMUX_HISTORY_LIMIT);
+  try {
+    execTmuxFileSync(
+      ["set-option", "-q", "-t", sessionName, "history-limit", boundedHistoryLimit],
+      { stdio: "ignore" },
+    );
+  } catch (err) {
+    logCliOperationFailure(err);
+  }
+  if (!leaderPaneId) return;
+  try {
+    execTmuxFileSync(
+      ["set-option", "-pq", "-t", leaderPaneId, "history-limit", boundedHistoryLimit],
+      { stdio: "ignore" },
+    );
+  } catch (err) {
+    logCliOperationFailure(err);
+  }
+}
+
+function clearDetachedTmuxSessionHistoryIfUnattached(
+  sessionName: string,
+  leaderPaneId: string,
+): void {
+  try {
+    const attached = execTmuxFileSync(
+      ["display-message", "-p", "-t", sessionName, "#{session_attached}"],
+      {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+      },
+    ).trim();
+    if (attached !== "0") return;
+    execTmuxFileSync(["clear-history", "-t", leaderPaneId], {
+      stdio: "ignore",
+    });
+  } catch (err) {
+    logCliOperationFailure(err);
+  }
+}
+
+function readTmuxSessionInstanceId(sessionName: string): string | null {
+  try {
+    return execTmuxFileSync(
+      ["show-options", "-qv", "-t", sessionName, OMX_INSTANCE_OPTION],
+      {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+      },
+    ).trim();
+  } catch {
+    return null;
+  }
+}
+
+function tmuxPaneBelongsToSession(paneId: string, sessionName: string): boolean {
+  try {
+    const paneSessionName = execTmuxFileSync(
+      ["display-message", "-p", "-t", paneId, "#{session_name}"],
+      {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf-8",
+      },
+    ).trim();
+    return paneSessionName === sessionName;
+  } catch {
+    return false;
+  }
+}
+
+function buildDetachedHistoryPruneHookCommand(leaderPaneId: string): string {
+  return `if-shell -F '#{==:#{session_attached},0}' 'clear-history -t ${leaderPaneId}'`;
+}
+
+function buildDetachedHistoryPruneHookSlot(sessionName: string, leaderPaneId: string): string {
+  const key = `${sessionName}:${leaderPaneId}:omx-history-prune`;
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+  }
+  return `client-detached[${Math.abs(hash) % TMUX_HOOK_INDEX_MAX}]`;
+}
+
 function hasErrnoCode(error: unknown, code: string): boolean {
   return Boolean(
     error &&
@@ -1290,6 +1382,8 @@ interface MadmaxDetachedActiveRecord {
   argv: string[];
   run_dir: string;
   tmux_session_name: string;
+  session_id?: string;
+  tmux_pane_id?: string;
 }
 
 function resolveMadmaxRunsRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -1397,10 +1491,23 @@ function readMadmaxDetachedActiveRecord(
       argv: [...parsed.argv],
       run_dir: parsed.run_dir,
       tmux_session_name: parsed.tmux_session_name,
+      ...(typeof parsed.session_id === "string" ? { session_id: parsed.session_id } : {}),
+      ...(typeof parsed.tmux_pane_id === "string" ? { tmux_pane_id: parsed.tmux_pane_id } : {}),
     };
   } catch {
     return null;
   }
+}
+
+function isReusableMadmaxDetachedActiveRecord(
+  record: MadmaxDetachedActiveRecord,
+): boolean {
+  if (!detachedTmuxSessionExists(record.tmux_session_name)) return false;
+  if (!record.session_id || !record.tmux_pane_id) return false;
+  if (readTmuxSessionInstanceId(record.tmux_session_name) !== record.session_id) {
+    return false;
+  }
+  return tmuxPaneBelongsToSession(record.tmux_pane_id, record.tmux_session_name);
 }
 
 function detachedTmuxSessionExists(sessionName: string): boolean {
@@ -1844,7 +1951,12 @@ async function showStatus(): Promise<void> {
   try {
     const refs = await listModeStateFilesWithScopePreference(cwd);
     const states = refs.map((ref) => ref.path);
+    const ultragoalState = await readUltragoalState(cwd).catch(() => null);
     if (states.length === 0) {
+      if (ultragoalState?.active) {
+        console.log(`ultragoal: ACTIVE (phase: ${ultragoalState.status})`);
+        return;
+      }
       console.log("No active modes.");
       return;
     }
@@ -1859,9 +1971,13 @@ async function showStatus(): Promise<void> {
       }
       const file = basename(path);
       const mode = file.replace("-state.json", "");
+      if (mode === "ultragoal" && ultragoalState?.active) continue;
       console.log(
         `${mode}: ${state.active === true ? "ACTIVE" : "inactive"} (phase: ${String(state.current_phase || "n/a")})`,
       );
+    }
+    if (ultragoalState?.active) {
+      console.log(`ultragoal: ACTIVE (phase: ${ultragoalState.status})`);
     }
   } catch (err) {
     logCliOperationFailure(err);
@@ -2952,6 +3068,7 @@ function buildDetachedSessionLeaderCommand(
     "};",
     "trap omx_detached_session_cleanup 0 INT TERM HUP;",
     parentEnvSource,
+    "unset OMX_HERMES_MCP_BRIDGE;",
     "omx_codex_started_at=$(date +%s 2>/dev/null || printf 0);",
     `${codexCmd} <&3 &`,
     "omx_codex_pid=$!;",
@@ -3300,14 +3417,40 @@ async function readLaunchAppendInstructions(): Promise<string> {
   return (await readFile(appendixPath, "utf-8")).trim();
 }
 
+export function shouldAttachDetachedTmuxSession(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env.OMX_HERMES_MCP_BRIDGE !== "1";
+}
+
+function stripHermesMcpBridgeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const { OMX_HERMES_MCP_BRIDGE: _bridge, ...rest } = env;
+  return rest;
+}
+
 export function buildDetachedSessionFinalizeSteps(
   sessionName: string,
   hudPaneId: string | null,
   hookWindowIndex: string | null,
   enableMouse: boolean,
   nativeWindows = false,
+  attachSession = true,
+  leaderPaneId: string | null = null,
 ): DetachedSessionTmuxStep[] {
   const steps: DetachedSessionTmuxStep[] = [];
+  if (!nativeWindows && leaderPaneId) {
+    steps.push({
+      name: "register-detached-history-prune-hook",
+      args: [
+        "set-hook",
+        "-t",
+        sessionName,
+        buildDetachedHistoryPruneHookSlot(sessionName, leaderPaneId),
+        buildDetachedHistoryPruneHookCommand(leaderPaneId),
+      ],
+    });
+  }
+
   if (!nativeWindows && hudPaneId && hookWindowIndex) {
     const hookTarget = buildResizeHookTarget(sessionName, hookWindowIndex);
     const hookName = buildResizeHookName(
@@ -3364,10 +3507,12 @@ export function buildDetachedSessionFinalizeSteps(
       args: [],
     });
   }
-  steps.push({
-    name: "attach-session",
-    args: ["attach-session", "-t", sessionName],
-  });
+  if (attachSession) {
+    steps.push({
+      name: "attach-session",
+      args: ["attach-session", "-t", sessionName],
+    });
+  }
   return steps;
 }
 
@@ -4026,7 +4171,7 @@ function runCodex(
     workerDefaultModel,
   );
   const codexBaseEnv = {
-    ...process.env,
+    ...stripHermesMcpBridgeEnv(process.env),
     ...(codexHomeOverride ? { CODEX_HOME: codexHomeOverride } : {}),
     ...(sqliteHomeOverride ? { [CODEX_SQLITE_HOME_ENV]: sqliteHomeOverride } : {}),
     ...(omxRootOverride ? { OMX_ROOT: omxRootOverride } : {}),
@@ -4070,22 +4215,36 @@ function runCodex(
     const staleHudPaneIds = currentPaneId
       ? listHudWatchPaneIdsInCurrentWindow(currentPaneId, { sessionId, leaderPaneId: currentPaneId })
       : [];
-    for (const paneId of staleHudPaneIds) {
+
+    let hudPaneId: string | null = null;
+    const [keeperHudPaneId, ...duplicateHudPaneIds] = staleHudPaneIds;
+    for (const paneId of duplicateHudPaneIds) {
       killTmuxPane(paneId);
     }
 
-    let hudPaneId: string | null = null;
-    try {
-      hudPaneId = createHudWatchPane(cwd, hudCmd, {
-        heightLines: HUD_TMUX_HEIGHT_LINES,
-        targetPaneId: currentPaneId,
-      });
-      if (hudPaneId && currentPaneId) {
-        registerHudResizeHook(hudPaneId, currentPaneId, HUD_TMUX_HEIGHT_LINES);
+    if (keeperHudPaneId) {
+      hudPaneId = keeperHudPaneId;
+      try {
+        resizeTmuxPane(hudPaneId, HUD_TMUX_HEIGHT_LINES);
+        if (currentPaneId) {
+          registerHudResizeHook(hudPaneId, currentPaneId, HUD_TMUX_HEIGHT_LINES);
+        }
+      } catch (err) {
+        logCliOperationFailure(err);
       }
-    } catch (err) {
-      logCliOperationFailure(err);
-      // HUD split failed, continue without it
+    } else {
+      try {
+        hudPaneId = createHudWatchPane(cwd, hudCmd, {
+          heightLines: HUD_TMUX_HEIGHT_LINES,
+          targetPaneId: currentPaneId,
+        });
+        if (hudPaneId && currentPaneId) {
+          registerHudResizeHook(hudPaneId, currentPaneId, HUD_TMUX_HEIGHT_LINES);
+        }
+      } catch (err) {
+        logCliOperationFailure(err);
+        // HUD split failed, continue without it
+      }
     }
 
     // Enable mouse scrolling at session start so scroll works before team
@@ -4155,9 +4314,23 @@ function runCodex(
       if (
         activeRecord &&
         activeRecord.context_key === contextKey &&
-        detachedTmuxSessionExists(activeRecord.tmux_session_name)
+        isReusableMadmaxDetachedActiveRecord(activeRecord)
       ) {
         cleanupCurrentMadmaxReuseRunRoot(process.env, runsRoot);
+        setDetachedTmuxSessionHistoryLimit(
+          activeRecord.tmux_session_name,
+          activeRecord.tmux_pane_id!,
+        );
+        if (!shouldAttachDetachedTmuxSession(process.env)) {
+          clearDetachedTmuxSessionHistoryIfUnattached(
+            activeRecord.tmux_session_name,
+            activeRecord.tmux_pane_id!,
+          );
+          process.stderr.write(
+            `[omx] madmax detached launch already active for this context; reusing ${activeRecord.tmux_session_name} without attaching because this launch is a Hermes MCP bridge.\n`,
+          );
+          return { postLaunchHandledExternally: true };
+        }
         process.stderr.write(
           `[omx] madmax detached launch already active for this context; attaching ${activeRecord.tmux_session_name} instead of starting a duplicate.\n`,
         );
@@ -4177,15 +4350,30 @@ function runCodex(
         rmSync(activeRecordPath, { force: true });
       }
 
-      void writeSessionStart(cwd, sessionId, { tmuxSessionName: sessionName }).catch((err) => {
-        logCliOperationFailure(err);
-        // Non-fatal: managed tmux recovery can still use compatibility fallback.
-      });
+      let detachedSessionBindingWrite: Promise<unknown> = Promise.resolve();
+      const writeDetachedSessionBinding = (tmuxPaneId?: string | null) => {
+        detachedSessionBindingWrite = detachedSessionBindingWrite
+          .catch((err) => {
+            logCliOperationFailure(err);
+          })
+          .then(() =>
+            writeSessionStart(cwd, sessionId, {
+              tmuxSessionName: sessionName,
+              ...(tmuxPaneId ? { tmuxPaneId } : {}),
+            }),
+          );
+        void detachedSessionBindingWrite.catch((err) => {
+          logCliOperationFailure(err);
+          // Non-fatal: managed tmux recovery can still use compatibility fallback.
+        });
+      };
+      writeDetachedSessionBinding();
       let createdDetachedSession = false;
       let registeredHookTarget: string | null = null;
       let registeredHookName: string | null = null;
       let registeredClientAttachedHookName: string | null = null;
       let detachedParentEnvFilePath: string | undefined;
+      let detachedLeaderPaneId: string | null = null;
       try {
         // This path is the user-shell interactive launch: OMX creates a tmux
         // session and immediately attaches the user's terminal to it. If a tmux
@@ -4224,18 +4412,25 @@ function runCodex(
           });
           if (step.name === "new-session") {
             createdDetachedSession = true;
-            if (activeRecordPath && contextKey) {
-              writeMadmaxDetachedActiveRecord(activeRecordPath, {
-                version: 1,
-                context_key: contextKey,
-                created_at: new Date().toISOString(),
-                source_cwd: process.env.OMX_SOURCE_CWD || cwd,
-                argv: args,
-                run_dir: process.env.OMX_ROOT || cwd,
-                tmux_session_name: sessionName,
-              });
+            const leaderPaneId = parsePaneIdFromTmuxOutput(output || "");
+            if (leaderPaneId) {
+              detachedLeaderPaneId = leaderPaneId;
+              setDetachedTmuxSessionHistoryLimit(sessionName, leaderPaneId);
+              if (activeRecordPath && contextKey) {
+                writeMadmaxDetachedActiveRecord(activeRecordPath, {
+                  version: 1,
+                  context_key: contextKey,
+                  created_at: new Date().toISOString(),
+                  source_cwd: process.env.OMX_SOURCE_CWD || cwd,
+                  argv: args,
+                  run_dir: process.env.OMX_ROOT || cwd,
+                  tmux_session_name: sessionName,
+                  session_id: sessionId,
+                  tmux_pane_id: leaderPaneId,
+                });
+              }
+              writeDetachedSessionBinding(leaderPaneId);
             }
-            parsePaneIdFromTmuxOutput(output || "");
           }
           if (step.name === "split-and-capture-hud-pane") {
             const hudPaneId = parsePaneIdFromTmuxOutput(output || "");
@@ -4270,6 +4465,8 @@ function runCodex(
               hookWindowIndex,
               process.env.OMX_MOUSE !== "0",
               nativeWindows,
+              shouldAttachDetachedTmuxSession(process.env),
+              detachedLeaderPaneId,
             );
             if (nativeWindows && detachedWindowsCodexCmd) {
               scheduleDetachedWindowsCodexLaunch(

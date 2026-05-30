@@ -8,7 +8,9 @@ import {
   type DeepInterviewQuestionEnforcementState,
 } from '../question/deep-interview.js';
 import {
-  markAutopilotDeepInterviewQuestionWaiting,
+  AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV,
+  claimAutopilotDeepInterviewQuestionWaiting,
+  readAutopilotDeepInterviewQuestionWaitState,
   resolveAutopilotDeepInterviewQuestionWaiting,
 } from '../question/autopilot-wait.js';
 import {
@@ -187,6 +189,26 @@ function isDeepInterviewQuestionSource(source: unknown): boolean {
   return typeof source === 'string' && source.trim() === 'deep-interview';
 }
 
+async function readOwningAutopilotDeepInterviewObligation(
+  cwd: string,
+  sessionId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<DeepInterviewQuestionEnforcementState | null> {
+  const ownerObligationId = String(env[AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV] ?? '').trim();
+  if (!ownerObligationId || !sessionId) return null;
+
+  const waitState = await readAutopilotDeepInterviewQuestionWaitState(cwd, sessionId);
+  if (waitState?.obligationId !== ownerObligationId) return null;
+
+  return {
+    obligation_id: waitState.obligationId,
+    source: 'omx-question',
+    status: 'pending',
+    lifecycle_outcome: 'askuserQuestion',
+    requested_at: waitState.requestedAt ?? new Date().toISOString(),
+  };
+}
+
 async function finalizeDirectDeepInterviewObligation(
   cwd: string,
   sessionId: string | undefined,
@@ -209,6 +231,9 @@ async function finalizeDirectDeepInterviewObligation(
     sessionId,
     obligation.obligation_id,
     outcome.status,
+    outcome.status === 'satisfied'
+      ? { questionId: outcome.questionId }
+      : { clearReason: 'error' },
   );
 }
 
@@ -294,17 +319,34 @@ export async function questionCommand(args: string[]): Promise<void> {
 
   let directDeepInterviewObligation: DeepInterviewQuestionEnforcementState | null = null;
   if (isDeepInterviewQuestionSource(input.source) && policy.sessionId) {
-    directDeepInterviewObligation = createDeepInterviewQuestionObligation();
-    await updateDeepInterviewQuestionEnforcement(
+    directDeepInterviewObligation = await readOwningAutopilotDeepInterviewObligation(
       cwd,
       policy.sessionId,
-      () => directDeepInterviewObligation ?? undefined,
     );
-    await markAutopilotDeepInterviewQuestionWaiting(
-      cwd,
-      policy.sessionId,
-      directDeepInterviewObligation,
-    );
+    if (!directDeepInterviewObligation) {
+      directDeepInterviewObligation = createDeepInterviewQuestionObligation();
+      const autopilotWaitClaim = await claimAutopilotDeepInterviewQuestionWaiting(
+        cwd,
+        policy.sessionId,
+        directDeepInterviewObligation,
+      );
+      if (autopilotWaitClaim === 'blocked') {
+        printJson({
+          ok: false,
+          error: {
+            code: 'active_execution_mode_blocked',
+            message: 'Autopilot cannot start a new deep-interview question until the existing wait claim is resolved.',
+          },
+        }, parsed.json);
+        process.exitCode = 1;
+        return;
+      }
+      await updateDeepInterviewQuestionEnforcement(
+        cwd,
+        policy.sessionId,
+        () => directDeepInterviewObligation ?? undefined,
+      );
+    }
   }
 
   const waitTimeoutMs = parseQuestionWaitTimeoutMs();

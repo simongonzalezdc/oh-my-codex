@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
+import { AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV } from '../autopilot-wait.js';
 import { evaluateQuestionPolicy } from '../policy.js';
 
 const tempDirs: string[] = [];
@@ -164,7 +165,7 @@ describe('evaluateQuestionPolicy autopilot deep-interview wait', { concurrency: 
     assert.equal(unrelatedSource.code, 'active_execution_mode_blocked');
   });
 
-  it('allows only controlled autopilot deep-interview questions while preserving unrelated guards', { concurrency: false }, async () => {
+  it('blocks duplicate deep-interview questions while autopilot is already waiting', { concurrency: false }, async () => {
     const cwd = await makeRepo();
     const sessionDir = join(cwd, '.omx', 'state', 'sessions', 'sess-auto');
     await mkdir(sessionDir, { recursive: true });
@@ -192,13 +193,39 @@ describe('evaluateQuestionPolicy autopilot deep-interview wait', { concurrency: 
     }, null, 2));
 
     await writeFile(join(cwd, '.omx', 'state', 'session.json'), JSON.stringify({ session_id: 'sess-auto' }));
-    const allowed = await evaluateQuestionPolicy({
+    const duplicateQuestion = await evaluateQuestionPolicy({
       cwd,
       explicitSessionId: 'sess-auto',
       questionSource: 'deep-interview',
       env: { ...process.env, OMX_TEAM_WORKER: '' },
     });
-    assert.equal(allowed.allowed, true);
+    assert.equal(duplicateQuestion.allowed, false);
+    assert.equal(duplicateQuestion.code, 'active_execution_mode_blocked');
+
+    const owningQuestion = await evaluateQuestionPolicy({
+      cwd,
+      explicitSessionId: 'sess-auto',
+      questionSource: 'deep-interview',
+      env: {
+        ...process.env,
+        OMX_TEAM_WORKER: '',
+        [AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV]: 'obligation-1',
+      },
+    });
+    assert.equal(owningQuestion.allowed, true);
+
+    const wrongOwnerQuestion = await evaluateQuestionPolicy({
+      cwd,
+      explicitSessionId: 'sess-auto',
+      questionSource: 'deep-interview',
+      env: {
+        ...process.env,
+        OMX_TEAM_WORKER: '',
+        [AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV]: 'obligation-other',
+      },
+    });
+    assert.equal(wrongOwnerQuestion.allowed, false);
+    assert.equal(wrongOwnerQuestion.code, 'active_execution_mode_blocked');
 
     const unrelatedSource = await evaluateQuestionPolicy({
       cwd,
@@ -218,5 +245,43 @@ describe('evaluateQuestionPolicy autopilot deep-interview wait', { concurrency: 
     });
     assert.equal(unrelatedMode.allowed, false);
     assert.equal(unrelatedMode.code, 'active_execution_mode_blocked');
+  });
+
+  it('rejects malformed autopilot waits that are not for the deep-interview child phase', { concurrency: false }, async () => {
+    const cwd = await makeRepo();
+    const sessionDir = join(cwd, '.omx', 'state', 'sessions', 'sess-auto-ralplan-wait');
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(join(sessionDir, 'autopilot-state.json'), JSON.stringify({
+      mode: 'autopilot',
+      active: true,
+      current_phase: 'waiting-for-user',
+      run_outcome: 'blocked_on_user',
+      lifecycle_outcome: 'askuserQuestion',
+      state: {
+        deep_interview_question: {
+          status: 'waiting_for_user',
+          source: 'omx-question',
+          obligation_id: 'obligation-ralplan',
+          previous_phase: 'ralplan',
+        },
+      },
+    }, null, 2));
+    await writeFile(join(sessionDir, 'skill-active-state.json'), JSON.stringify({
+      active: true,
+      skill: 'autopilot',
+      phase: 'ralplan',
+      active_skills: [{ skill: 'autopilot', phase: 'ralplan', active: true, session_id: 'sess-auto-ralplan-wait' }],
+      session_id: 'sess-auto-ralplan-wait',
+    }, null, 2));
+
+    const result = await evaluateQuestionPolicy({
+      cwd,
+      explicitSessionId: 'sess-auto-ralplan-wait',
+      questionSource: 'deep-interview',
+      env: { ...process.env, OMX_TEAM_WORKER: '' },
+    });
+
+    assert.equal(result.allowed, false);
+    assert.equal(result.code, 'active_execution_mode_blocked');
   });
 });

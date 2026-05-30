@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { hudCommand, runWatchMode } from '../index.js';
+import { hudCommand, resolveHudWatchCwd, runWatchMode } from '../index.js';
 import { renderHud } from '../render.js';
 import { OMX_TMUX_HUD_OWNER_ENV } from '../reconcile.js';
 import { OMX_TMUX_HUD_LEADER_PANE_ENV } from '../tmux.js';
@@ -62,6 +62,68 @@ afterEach(() => {
 });
 
 describe('runWatchMode', () => {
+  it('resolves a live cwd when the HUD launch path was reused by another run', () => {
+    const resolved = resolveHudWatchCwd('/home/tools/calc', {
+      getCwd: () => '/home/tools/calc',
+      readProcCwd: () => '/home/tools/calc.noninteractive-aborted-20260527T233204Z',
+      realpath: (path) => {
+        if (path === '/home/tools/calc') return '/dev/inode/new-calc-run';
+        if (path === '/home/tools/calc.noninteractive-aborted-20260527T233204Z') {
+          return '/dev/inode/old-aborted-run';
+        }
+        return path;
+      },
+    });
+
+    assert.equal(resolved, '/home/tools/calc.noninteractive-aborted-20260527T233204Z');
+  });
+
+  it('keeps the launch cwd when live and launch paths resolve to the same directory', () => {
+    const resolved = resolveHudWatchCwd('/workspace/link', {
+      getCwd: () => '/workspace/link',
+      readProcCwd: () => '/workspace/real',
+      realpath: () => '/dev/inode/same-project',
+    });
+
+    assert.equal(resolved, '/workspace/link');
+  });
+
+  it('reads HUD state from the resolved live cwd on every watch frame', async () => {
+    const seenConfigCwds: string[] = [];
+    const seenStateCwds: string[] = [];
+    const seenAuthorityCwds: string[] = [];
+    let sigintHandler: (() => void) | undefined;
+
+    const promise = runWatchMode('/home/tools/calc', WATCH_FLAGS, {
+      isTTY: true,
+      env: {},
+      resolveWatchCwdFn: () => '/home/tools/calc.noninteractive-aborted-20260527T233204Z',
+      readHudConfigFn: async (cwd) => {
+        seenConfigCwds.push(cwd);
+        return { preset: 'focused', git: { display: 'repo-branch' }, statusLine: { preset: 'focused' } };
+      },
+      readAllStateFn: async (cwd) => {
+        seenStateCwds.push(cwd);
+        return emptyCtx();
+      },
+      renderHudFn: () => 'frame',
+      runAuthorityTickFn: async ({ cwd }) => { seenAuthorityCwds.push(cwd); },
+      writeStdout: () => {},
+      writeStderr: () => {},
+      registerSigint: (handler) => { sigintHandler = handler; },
+      setIntervalFn: () => ({}) as ReturnType<typeof setInterval>,
+      clearIntervalFn: () => {},
+    });
+
+    await flush();
+    sigintHandler?.();
+    await promise;
+
+    assert.deepEqual(seenConfigCwds, ['/home/tools/calc.noninteractive-aborted-20260527T233204Z']);
+    assert.deepEqual(seenStateCwds, ['/home/tools/calc.noninteractive-aborted-20260527T233204Z']);
+    assert.deepEqual(seenAuthorityCwds, ['/home/tools/calc.noninteractive-aborted-20260527T233204Z']);
+  });
+
   it('restores cursor and clears interval on SIGINT', async () => {
     const writes: string[] = [];
     let sigintHandler: (() => void) | undefined;
@@ -403,6 +465,60 @@ describe('runWatchMode', () => {
     assert.ok(writes.some((chunk) => chunk.includes('frame')));
   });
 
+  it('keeps rendering when the authority tick fails after a frame', async () => {
+    const writes: string[] = [];
+    const errors: string[] = [];
+    let sigintHandler: (() => void) | undefined;
+    let timerTick: (() => void) | undefined;
+    let renderCount = 0;
+    let authorityCalls = 0;
+    const firstAuthorityAttempted = deferred();
+    const secondReadStarted = deferred();
+
+    const promise = runWatchMode('/tmp', WATCH_FLAGS, {
+      isTTY: true,
+      env: {},
+      readAllStateFn: async () => {
+        renderCount += 1;
+        if (renderCount === 2) secondReadStarted.resolve();
+        return emptyCtx();
+      },
+      readHudConfigFn: async () => ({ preset: 'focused', git: { display: 'repo-branch' }, statusLine: { preset: 'focused' } }),
+      renderHudFn: () => 'frame',
+      writeStdout: (text) => { writes.push(text); },
+      writeStderr: (text) => { errors.push(text); },
+      registerSigint: (handler) => { sigintHandler = handler; },
+      setIntervalFn: (handler) => {
+        timerTick = handler;
+        return ({}) as ReturnType<typeof setInterval>;
+      },
+      clearIntervalFn: () => {},
+      runAuthorityTickFn: async () => {
+        authorityCalls += 1;
+        if (authorityCalls === 1) {
+          firstAuthorityAttempted.resolve();
+          throw new Error('dist is rebuilding');
+        }
+      },
+    });
+
+    await withTimeout(firstAuthorityAttempted.promise, 'first authority tick should run');
+    await flush();
+    assert.equal(process.exitCode, undefined);
+    assert.ok(errors.some((line) => line.includes('HUD watch authority tick failed: dist is rebuilding')));
+
+    timerTick?.();
+    await withTimeout(secondReadStarted.promise, 'watch should render again after authority tick failure');
+    sigintHandler?.();
+    await promise;
+
+    assert.equal(renderCount, 2);
+    assert.equal(authorityCalls, 2);
+    assert.equal(process.exitCode, undefined);
+    assert.equal((writes.join('').match(/frame/g) ?? []).length, 2);
+    assert.ok(!errors.some((line) => line.includes('HUD watch render failed')));
+  });
+
   it('handles render failures gracefully and restores terminal state', async () => {
     const writes: string[] = [];
     const errors: string[] = [];
@@ -431,6 +547,67 @@ describe('runWatchMode', () => {
 });
 
 describe('hudCommand --tmux', () => {
+  it('removes duplicate same-leader HUD panes and reuses one when launched with --tmux', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'omx-hud-tmux-duplicate-test-'));
+    const logPath = join(tmp, 'tmux.log');
+    const fakeBin = join(tmp, 'bin');
+    await mkdir(fakeBin);
+    const tmuxPath = join(fakeBin, 'tmux');
+    await writeFile(tmuxPath, `#!/usr/bin/env bash
+printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
+if [[ "$1" == "display-message" && "$*" == *'#{session_id}'* ]]; then
+  printf '$7\t@3\n'
+  exit 0
+fi
+if [[ "$1" == "list-panes" ]]; then
+  printf '%s\n' '%1	zsh	zsh'
+  printf '%s\n' "%2	node	exec env OMX_SESSION_ID='sess-a' OMX_TMUX_HUD_LEADER_PANE='%1' /node /omx.js hud --watch"
+  printf '%s\n' "%3	node	exec env OMX_SESSION_ID='sess-a' OMX_TMUX_HUD_LEADER_PANE='%1' /node /omx.js hud --watch"
+  exit 0
+fi
+if [[ "$1" == "resize-pane" || "$1" == "set-hook" || "$1" == "kill-pane" ]]; then
+  exit 0
+fi
+if [[ "$1" == "split-window" ]]; then
+  echo '%9'
+  exit 0
+fi
+exit 0
+`);
+    await chmod(tmuxPath, 0o755);
+
+    const previousEnv = {
+      PATH: process.env.PATH,
+      TMUX: process.env.TMUX,
+      TMUX_PANE: process.env.TMUX_PANE,
+      OMX_SESSION_ID: process.env.OMX_SESSION_ID,
+    };
+    const previousLog = console.log;
+    const logs: string[] = [];
+    try {
+      process.env.PATH = `${fakeBin}${delimiter}${process.env.PATH ?? ''}`;
+      process.env.TMUX = '/tmp/tmux-1000/default,12345,0';
+      process.env.TMUX_PANE = '%1';
+      process.env.OMX_SESSION_ID = 'sess-a';
+      console.log = (message?: unknown) => { logs.push(String(message ?? '')); };
+
+      await hudCommand(['--tmux']);
+
+      const tmuxLog = await readFile(logPath, 'utf8');
+      assert.match(tmuxLog, /list-panes -t %1 -F #\{pane_id\}\x1f#\{pane_current_command\}\x1f#\{pane_start_command\}\x1f#\{pane_current_path\}/);
+      assert.match(tmuxLog, /kill-pane -t %3/);
+      assert.match(tmuxLog, /resize-pane -t %2 -y \d+/);
+      assert.doesNotMatch(tmuxLog, /split-window/);
+      assert.ok(logs.some((line) => line.includes('Removed duplicate HUD panes and reused existing HUD pane')));
+    } finally {
+      console.log = previousLog;
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (typeof value === 'string') process.env[key] = value;
+        else delete process.env[key];
+      }
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
   it('reuses a same-session HUD pane when TMUX_PANE is empty instead of splitting a duplicate', async () => {
     const tmp = await mkdtemp(join(tmpdir(), 'omx-hud-tmux-test-'));
     const logPath = join(tmp, 'tmux.log');
@@ -482,7 +659,7 @@ exit 0
 
       const tmuxLog = await readFile(logPath, 'utf8');
       assert.match(tmuxLog, /display-message -p #\{pane_id\}/);
-      assert.match(tmuxLog, /list-panes -t %1 -F #\{pane_id\}\t#\{pane_current_command\}\t#\{pane_start_command\}/);
+      assert.match(tmuxLog, /list-panes -t %1 -F #\{pane_id\}\x1f#\{pane_current_command\}\x1f#\{pane_start_command\}\x1f#\{pane_current_path\}/);
       assert.match(tmuxLog, /resize-pane -t %2 -y \d+/);
       assert.doesNotMatch(tmuxLog, /split-window/);
       assert.ok(logs.some((line) => line.includes('Reused existing HUD pane')));

@@ -3,8 +3,8 @@ import { readCurrentSessionId } from '../mcp/state-paths.js';
 import { listActiveSkills, readVisibleSkillActiveState } from '../state/skill-active.js';
 import { readActiveWorkflowModes } from '../state/workflow-transition.js';
 import {
+  AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV,
   canStartAutopilotDeepInterviewQuestion,
-  readAutopilotDeepInterviewQuestionWaitState,
 } from './autopilot-wait.js';
 
 const BLOCKED_EXECUTION_SKILLS = new Set([
@@ -94,13 +94,11 @@ export async function evaluateQuestionPolicy(
   if (blocked.length > 0) {
     const source = safeString(options.questionSource).trim();
     if (source === 'deep-interview' && onlyControlledAutopilotQuestionBlock(blocked)) {
-      const autopilotWait = await readAutopilotDeepInterviewQuestionWaitState(
+      const canStartAutopilotQuestion = await canStartAutopilotDeepInterviewQuestion(
         options.cwd,
         sessionId,
+        { ownerObligationId: env[AUTOPILOT_DEEP_INTERVIEW_QUESTION_OWNER_ENV] },
       );
-      const canStartAutopilotQuestion = autopilotWait
-        ? true
-        : await canStartAutopilotDeepInterviewQuestion(options.cwd, sessionId);
       if (canStartAutopilotQuestion) {
         return {
           allowed: true,
