@@ -6,7 +6,6 @@ import TOML from '@iarna/toml';
 const root = process.cwd();
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')) as Record<string, unknown>;
 const workspace = TOML.parse(readFileSync(join(root, 'Cargo.toml'), 'utf-8')) as Record<string, unknown>;
-const explore = TOML.parse(readFileSync(join(root, 'crates', 'omx-explore', 'Cargo.toml'), 'utf-8')) as Record<string, unknown>;
 const runtimeCore = TOML.parse(readFileSync(join(root, 'crates', 'omx-runtime-core', 'Cargo.toml'), 'utf-8')) as Record<string, unknown>;
 const mux = TOML.parse(readFileSync(join(root, 'crates', 'omx-mux', 'Cargo.toml'), 'utf-8')) as Record<string, unknown>;
 const api = TOML.parse(readFileSync(join(root, 'crates', 'omx-api', 'Cargo.toml'), 'utf-8')) as Record<string, unknown>;
@@ -26,9 +25,6 @@ if (pkgVersion && workspaceVersion && pkgVersion !== workspaceVersion) {
 }
 if ((api.package as Record<string, unknown>)?.version !== undefined && ((api.package as Record<string, unknown>).version as Record<string, unknown>)?.workspace !== true) {
   problems.push('crates/omx-api/Cargo.toml must use version.workspace = true');
-}
-if ((explore.package as Record<string, unknown>)?.version !== undefined && ((explore.package as Record<string, unknown>).version as Record<string, unknown>)?.workspace !== true) {
-  problems.push('crates/omx-explore/Cargo.toml must use version.workspace = true');
 }
 if ((runtimeCore.package as Record<string, unknown>)?.version !== undefined && ((runtimeCore.package as Record<string, unknown>).version as Record<string, unknown>)?.workspace !== true) {
   problems.push('crates/omx-runtime-core/Cargo.toml must use version.workspace = true');

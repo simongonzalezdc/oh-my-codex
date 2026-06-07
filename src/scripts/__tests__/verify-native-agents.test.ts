@@ -55,7 +55,7 @@ describe("verify-native-agents", () => {
         },
       ]),
       definitions: { executor: definition, "style-reviewer": { ...definition, name: "style-reviewer" } },
-      promptNames: new Set(["executor", "style-reviewer", "explore-harness"]),
+      promptNames: new Set(["executor", "style-reviewer"]),
       pluginManifest: { skills: "./skills/", hooks: "./hooks/hooks.json" },
     });
 

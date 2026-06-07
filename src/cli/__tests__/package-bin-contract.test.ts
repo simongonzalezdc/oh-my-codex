@@ -38,11 +38,8 @@ describe('package bin contract', () => {
     );
 
     assert.deepEqual(pkg.bin, { omx: 'dist/cli/omx.js' });
-    assert.equal(pkg.scripts?.['build:explore'], 'cargo build -p omx-explore-harness');
-    assert.equal(pkg.scripts?.['build:explore:release'], 'node dist/scripts/build-explore-harness.js');
-    assert.equal(pkg.scripts?.['build:full'], 'npm run build && npm run build:explore:release && npm run build:sparkshell && npm run build:api');
+    assert.equal(pkg.scripts?.['build:full'], 'npm run build && npm run build:sparkshell && npm run build:api');
     assert.equal(pkg.scripts?.['build:api'], 'node dist/scripts/build-api.js');
-    assert.equal(pkg.scripts?.['clean:native-package-assets'], 'node dist/scripts/cleanup-explore-harness.js');
     assert.equal(pkg.scripts?.['sync:plugin'], 'node dist/scripts/sync-plugin-mirror.js');
     assert.equal(pkg.scripts?.['sync:plugin:check'], 'node dist/scripts/sync-plugin-mirror.js --check');
     assert.equal(pkg.scripts?.['verify:plugin-bundle'], 'node dist/scripts/sync-plugin-mirror.js --check');
@@ -52,7 +49,6 @@ describe('package bin contract', () => {
     assert.match(pkg.scripts?.postinstall ?? '', /dist\/scripts\/postinstall\.js/);
     assert.match(pkg.scripts?.postinstall ?? '', /existsSync/);
     assert.equal(pkg.scripts?.postpack, 'npm run clean:native-package-assets');
-    assert.equal(pkg.scripts?.['test:explore'], 'cargo test -p omx-explore-harness && node --test dist/cli/__tests__/explore.test.js dist/hooks/__tests__/explore-routing.test.js dist/hooks/__tests__/explore-sparkshell-guidance-contract.test.js');
     assert.equal(pkg.scripts?.['test:team:cross-rebase-smoke:compiled'], 'node dist/scripts/run-test-files.js dist/team/__tests__/cross-rebase-smoke.test.js');
     assert.equal(pkg.scripts?.['test:node'], 'node dist/scripts/run-test-files.js dist');
     assert.equal(pkg.scripts?.test, 'npm run build && npm run verify:native-agents && npm run verify:plugin-bundle && npm run test:node && node dist/scripts/generate-catalog-docs.js --check');
@@ -194,14 +190,9 @@ describe('package bin contract', () => {
     const binEntry = results[0]?.files?.find((file) => file.path === 'dist/cli/omx.js');
     assert.ok(binEntry, 'expected npm pack output to include dist/cli/omx.js');
 
-    const packagedHarnessPath = process.platform === 'win32' ? 'bin/omx-explore-harness.exe' : 'bin/omx-explore-harness';
-    const packagedHarnessEntry = results[0]?.files?.find((file) => file.path === packagedHarnessPath);
-    const packagedHarnessMetaEntry = results[0]?.files?.find((file) => file.path === 'bin/omx-explore-harness.meta.json');
     const nativeBinaryEntry = results[0]?.files?.find((file) => file.path.includes('bin/native/'));
     const cargoTomlEntry = results[0]?.files?.find((file) => file.path === 'Cargo.toml');
     const cargoLockEntry = results[0]?.files?.find((file) => file.path === 'Cargo.lock');
-    const crateManifestEntry = results[0]?.files?.find((file) => file.path === 'crates/omx-explore/Cargo.toml');
-    const crateMainEntry = results[0]?.files?.find((file) => file.path === 'crates/omx-explore/src/main.rs');
     const marketplaceEntry = results[0]?.files?.find((file) => file.path === '.agents/plugins/marketplace.json');
     const pluginManifestEntry = results[0]?.files?.find((file) => file.path === 'plugins/oh-my-codex/.codex-plugin/plugin.json');
     const pluginMcpEntry = results[0]?.files?.find((file) => file.path === 'plugins/oh-my-codex/.mcp.json');
@@ -223,13 +214,9 @@ describe('package bin contract', () => {
       || file.path === 'plugins/oh-my-codex/.codex-plugin/hooks.json'
       || file.path.startsWith('plugins/oh-my-codex/.omx/hooks/'));
 
-    assert.equal(packagedHarnessEntry, undefined, `did not expect ${packagedHarnessPath} in npm pack output`);
-    assert.equal(packagedHarnessMetaEntry, undefined, 'did not expect packaged explore harness metadata in npm pack output');
     assert.equal(nativeBinaryEntry, undefined, 'did not expect staged native binaries in npm pack output');
     assert.ok(cargoTomlEntry, 'expected npm pack output to include Cargo.toml');
     assert.ok(cargoLockEntry, 'expected npm pack output to include Cargo.lock');
-    assert.ok(crateManifestEntry, 'expected npm pack output to include crates/omx-explore/Cargo.toml');
-    assert.ok(crateMainEntry, 'expected npm pack output to include crates/omx-explore/src/main.rs');
     assert.ok(marketplaceEntry, 'expected npm pack output to include .agents/plugins/marketplace.json');
     assert.ok(pluginManifestEntry, 'expected npm pack output to include plugins/oh-my-codex/.codex-plugin/plugin.json');
     assert.ok(pluginMcpEntry, 'expected npm pack output to include plugins/oh-my-codex/.mcp.json');

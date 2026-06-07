@@ -1614,7 +1614,6 @@ describe("commandOwnsLocalHelp", () => {
       "question",
       "autoresearch",
       "deepinit",
-      "explore",
       "hooks",
       "hud",
       "ralph",
@@ -1649,16 +1648,6 @@ describe("resolveCliInvocation", () => {
       resolveCliInvocation(["api", "status"]),
       {
         command: "api",
-        launchArgs: [],
-      },
-    );
-  });
-
-  it("resolves explore to explore command", () => {
-    assert.deepEqual(
-      resolveCliInvocation(["explore", "--prompt", "find", "auth"]),
-      {
-        command: "explore",
         launchArgs: [],
       },
     );

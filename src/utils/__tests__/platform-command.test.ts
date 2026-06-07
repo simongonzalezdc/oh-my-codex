@@ -497,7 +497,7 @@ describe('spawnPlatformCommandSync', () => {
 
 
   it('retries blocked node-hosted scripts through process.execPath on non-Windows', () => {
-    const scriptPath = '/tmp/omx-explore-stub.js';
+    const scriptPath = '/tmp/omx-native-stub.js';
     const calls: Array<{ command: string; args: readonly string[] }> = [];
 
     const probed = spawnPlatformCommandSync(

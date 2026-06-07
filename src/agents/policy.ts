@@ -5,7 +5,6 @@ import type {
 } from "../catalog/schema.js";
 
 export const NON_NATIVE_AGENT_PROMPT_ASSETS = new Set([
-  "explore-harness",
   "sisyphus-lite",
   "team-orchestrator",
 ]);

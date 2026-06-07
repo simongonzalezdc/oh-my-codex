@@ -23,11 +23,6 @@ import {
 } from "../utils/platform-command.js";
 import { getCatalogExpectations } from "./catalog-contract.js";
 import { parse as parseToml } from "@iarna/toml";
-import {
-	getBuiltinExploreHarnessUnsupportedReason,
-	resolvePackagedExploreHarnessCommand,
-	EXPLORE_BIN_ENV,
-} from "./explore.js";
 import { getPackageRoot } from "../utils/package.js";
 import {
 	hasLegacyOmxTeamRunTable,
@@ -42,10 +37,6 @@ import {
 } from "../config/codex-hooks.js";
 import { OMX_FIRST_PARTY_MCP_SERVER_NAMES } from "../config/omx-first-party-mcp.js";
 import { getDefaultBridge, isBridgeEnabled } from "../runtime/bridge.js";
-import {
-	OMX_EXPLORE_CMD_ENV,
-	isExploreCommandRoutingEnabled,
-} from "../hooks/explore-routing.js";
 import {
 	OMX_LORE_COMMIT_GUARD_ENV,
 	isLoreCommitGuardEnabled,
@@ -186,9 +177,6 @@ export async function doctor(options: DoctorOptions = {}): Promise<void> {
 	// Check 2: Node.js version
 	checks.push(checkNodeVersion());
 
-	// Check 2.5: Explore harness readiness
-	checks.push(checkExploreHarness());
-
 	// Check 3: Codex home directory
 	checks.push(checkDirectory("Codex home", paths.codexHomeDir));
 
@@ -219,9 +207,6 @@ export async function doctor(options: DoctorOptions = {}): Promise<void> {
 	}
 	const runtimeMirrorCheck = await checkNativeHookRuntimeMirrors(cwd, paths.hooksPath);
 	if (runtimeMirrorCheck) checks.push(runtimeMirrorCheck);
-
-	// Check 4.5: Explore routing default
-	checks.push(await checkExploreRouting(paths.configPath));
 
 	// Check 4.6: Lore commit guard default
 	checks.push(await checkLoreCommitGuard(paths.configPath));
@@ -692,94 +677,6 @@ function checkNodeVersion(): Check {
 	};
 }
 
-export function checkExploreHarness(
-	platform: NodeJS.Platform = process.platform,
-	env: NodeJS.ProcessEnv = process.env,
-): Check {
-	const packageRoot = getPackageRoot();
-	const manifestPath = join(packageRoot, "crates", "omx-explore", "Cargo.toml");
-	if (!existsSync(manifestPath)) {
-		return {
-			name: "Explore Harness",
-			status: "warn",
-			message:
-				"Rust harness sources not found in this install (omx explore unavailable until packaged or OMX_EXPLORE_BIN is set)",
-		};
-	}
-
-	const override = env[EXPLORE_BIN_ENV]?.trim();
-	if (override) {
-		const resolved = join(packageRoot, override);
-		if (existsSync(override) || existsSync(resolved)) {
-			return {
-				name: "Explore Harness",
-				status: "pass",
-				message: `${EXPLORE_BIN_ENV} configured (${override})`,
-			};
-		}
-		return {
-			name: "Explore Harness",
-			status: "warn",
-			message: `OMX_EXPLORE_BIN is set but path was not found (${override})`,
-		};
-	}
-
-	const unsupportedReason = getBuiltinExploreHarnessUnsupportedReason(
-		platform,
-		env,
-	);
-	if (unsupportedReason) {
-		return {
-			name: "Explore Harness",
-			status: "warn",
-			message: unsupportedReason,
-		};
-	}
-
-	const packaged = resolvePackagedExploreHarnessCommand(packageRoot);
-	if (packaged) {
-		return {
-			name: "Explore Harness",
-			status: "pass",
-			message: `ready (packaged native binary: ${packaged.command})`,
-		};
-	}
-
-	const { result } = spawnPlatformCommandSync("cargo", ["--version"], {
-		encoding: "utf-8",
-		stdio: ["pipe", "pipe", "pipe"],
-	});
-	if (result.error) {
-		const kind = classifySpawnError(result.error as NodeJS.ErrnoException);
-		if (kind === "missing") {
-			return {
-				name: "Explore Harness",
-				status: "warn",
-				message: `Rust harness sources are packaged, but no compatible packaged prebuilt or cargo was found (install Rust or set ${EXPLORE_BIN_ENV} for omx explore)`,
-			};
-		}
-		return {
-			name: "Explore Harness",
-			status: "warn",
-			message: `Rust harness sources are packaged, but cargo probe failed (${result.error.message})`,
-		};
-	}
-
-	if (result.status === 0) {
-		const version = (result.stdout || "").trim();
-		return {
-			name: "Explore Harness",
-			status: "pass",
-			message: `ready (${version || "cargo available"})`,
-		};
-	}
-
-	return {
-		name: "Explore Harness",
-		status: "warn",
-		message: `Rust harness sources are packaged, but cargo probe failed with exit ${result.status} (install Rust or set ${EXPLORE_BIN_ENV})`,
-	};
-}
 
 function checkDirectory(name: string, path: string): Check {
 	if (existsSync(path)) {
@@ -916,74 +813,6 @@ async function checkModelContextRecommendation(
 	}
 }
 
-async function checkExploreRouting(configPath: string): Promise<Check> {
-	const envValue = process.env[OMX_EXPLORE_CMD_ENV];
-	if (typeof envValue === "string") {
-		if (isExploreCommandRoutingEnabled(process.env)) {
-			return {
-				name: "Explore routing",
-				status: "warn",
-				message:
-					"deprecated compatibility routing enabled by environment override; remove USE_OMX_EXPLORE_CMD or set it to 0 and use normal Codex repo inspection or omx sparkshell instead",
-			};
-		}
-		return {
-			name: "Explore routing",
-			status: "pass",
-			message:
-				"deprecated compatibility routing disabled by environment override (recommended)",
-		};
-	}
-
-	if (!existsSync(configPath)) {
-		return {
-			name: "Explore routing",
-			status: "pass",
-			message: "deprecated by default (config.toml not found yet)",
-		};
-	}
-
-	try {
-		const content = await readFile(configPath, "utf-8");
-		const parsed = parseToml(content) as {
-			env?: Record<string, unknown>;
-			shell_environment_policy?: { set?: Record<string, unknown> };
-		};
-		const configuredValue =
-			parsed?.shell_environment_policy?.set?.USE_OMX_EXPLORE_CMD ??
-			parsed?.env?.USE_OMX_EXPLORE_CMD;
-
-		if (typeof configuredValue === "string") {
-			if (isExploreCommandRoutingEnabled({
-				USE_OMX_EXPLORE_CMD: configuredValue,
-			})) {
-				return {
-					name: "Explore routing",
-					status: "warn",
-					message:
-						'deprecated compatibility routing enabled in config.toml; set USE_OMX_EXPLORE_CMD = "0" under [shell_environment_policy.set] and use normal Codex repo inspection or omx sparkshell instead',
-				};
-			}
-			return {
-				name: "Explore routing",
-				status: "pass",
-				message: "deprecated compatibility routing disabled in config.toml (recommended)",
-			};
-		}
-
-		return {
-			name: "Explore routing",
-			status: "pass",
-			message: "deprecated by default",
-		};
-	} catch {
-		return {
-			name: "Explore routing",
-			status: "fail",
-			message: "cannot read config.toml for explore routing check",
-		};
-	}
-}
 
 const LORE_COMMIT_GUARD_EXPLICIT_OPT_OUT_VALUES = new Set([
 	"0",

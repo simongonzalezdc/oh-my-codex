@@ -39,7 +39,6 @@ import {
   type CleanupDependencies,
   type CleanupResult,
 } from "./cleanup.js";
-import { exploreCommand } from "./explore.js";
 import { sparkshellCommand } from "./sparkshell.js";
 import { apiCommand } from "./api.js";
 import { agentsInitCommand } from "./agents-init.js";
@@ -222,7 +221,6 @@ Usage:
   omx question  OMX-owned blocking question UI entrypoint for agent-invoked user questions
   omx adapt     Scaffold OMX-owned adapter foundations for persistent external targets
   omx resume    Resume a previous interactive Codex session
-  omx explore   DEPRECATED compatibility command; use normal repo inspection or omx sparkshell
   omx api       Run native omx-api localhost gateway commands (serve|status|stop|generate)
   omx session   Search prior local session transcripts and history artifacts
   omx agents-init [path]
@@ -255,7 +253,6 @@ Usage:
   omx sparkshell <command> [args...]
   omx sparkshell --tmux-pane <pane-id> [--tail-lines <100-1000>]
                 Run native sparkshell sidecar for direct command execution or explicit tmux-pane summarization
-                (also used as an adaptive backend for qualifying read-only explore tasks)
   omx help      Show this help message
   omx status    Show active modes and state
   omx cancel    Cancel active execution modes
@@ -380,7 +377,6 @@ type CliCommand =
   | "ask"
   | "question"
   | "adapt"
-  | "explore"
   | "api"
   | "sparkshell"
   | "team"
@@ -407,7 +403,6 @@ const NESTED_HELP_COMMANDS = new Set<CliCommand>([
   "cleanup",
   "auth",
   "adapt",
-  "explore",
   "autoresearch",
   "autoresearch-goal",
   "agents",
@@ -2066,7 +2061,6 @@ export async function main(args: string[]): Promise<void> {
     "question",
     "autoresearch",
   "autoresearch-goal",
-    "explore",
     "api",
     "sparkshell",
     "team",
@@ -2179,9 +2173,6 @@ export async function main(args: string[]): Promise<void> {
         break;
       case "autoresearch-goal":
         await autoresearchGoalCommand(args.slice(1));
-        break;
-      case "explore":
-        await exploreCommand(args.slice(1));
         break;
       case "api":
         await apiCommand(args.slice(1));

@@ -108,8 +108,6 @@ const SHARED_MCP_REGISTRY_END_MARKER =
   "# End oh-my-codex shared MCP registry sync";
 const OMX_AGENTS_MAX_THREADS = 6;
 const OMX_AGENTS_MAX_DEPTH = 2;
-const OMX_EXPLORE_ROUTING_DEFAULT = "0";
-const OMX_EXPLORE_CMD_ENV = "USE_OMX_EXPLORE_CMD";
 const DEFAULT_LAUNCHER_MCP_STARTUP_TIMEOUT_SEC = 15;
 const STATUS_LINE_FOCUSED_FIELDS: readonly string[] = [
   "model-with-reasoning",
@@ -1423,15 +1421,6 @@ function upsertEnvSettings(config: string): string {
   if (shellEnvSetRange === undefined) {
     const base = lines.join("\n").trimEnd();
     const envLines = legacyEnvEntries.flatMap((entry) => entry.lines);
-    if (
-      legacyEnvEntries.every(
-        (entry) => entry.key !== OMX_EXPLORE_CMD_ENV,
-      )
-    ) {
-      envLines.push(
-        `${OMX_EXPLORE_CMD_ENV} = "${OMX_EXPLORE_ROUTING_DEFAULT}"`,
-      );
-    }
     const envBlock = [
       "[shell_environment_policy.set]",
       ...envLines,
@@ -1453,12 +1442,6 @@ function upsertEnvSettings(config: string): string {
       linesToInsert.push(...entry.lines);
       shellEnvKeys.add(entry.key);
     }
-  }
-
-  if (!shellEnvKeys.has(OMX_EXPLORE_CMD_ENV)) {
-    linesToInsert.push(
-      `${OMX_EXPLORE_CMD_ENV} = "${OMX_EXPLORE_ROUTING_DEFAULT}"`,
-    );
   }
 
   if (linesToInsert.length > 0) {
@@ -1617,14 +1600,7 @@ export function upsertCodexHooksFeatureFlag(
 }
 
 export function stripOmxEnvSettings(config: string): string {
-  let lines = config.split(/\r?\n/);
-  lines = stripTomlTableKey(lines, /^\s*\[env\]\s*$/, OMX_EXPLORE_CMD_ENV);
-  lines = stripTomlTableKey(
-    lines,
-    /^\s*\[shell_environment_policy\.set\]\s*$/,
-    OMX_EXPLORE_CMD_ENV,
-  );
-  return lines.join("\n");
+  return config;
 }
 
 // ---------------------------------------------------------------------------
@@ -2400,7 +2376,7 @@ function getOmxTablesBlock(
  * Layout:
  *   1. OMX top-level keys (notify, model_reasoning_effort, developer_instructions)
  *   2. [features] with multi_agent + child_agents_md + hooks + goals
- *   3. [shell_environment_policy.set] with defaulted deprecated explore-routing opt-out
+ *   3. [shell_environment_policy.set] with defaulted deprecated feature opt-outs
  *   4. … user sections …
  *   5. OMX [table] sections (mcp_servers, tui)
  */

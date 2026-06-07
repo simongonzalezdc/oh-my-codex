@@ -49,7 +49,6 @@ function runCompatTarget(cwd: string, argv: string[], envOverrides: Record<strin
     'OMX_TEAM_STATE_ROOT',
     'OMX_SESSION_ID',
     'CODEX_SESSION_ID',
-    'USE_OMX_EXPLORE_CMD',
   ]) {
     delete env[key];
   }

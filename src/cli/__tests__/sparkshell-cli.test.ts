@@ -462,7 +462,6 @@ describe('omx sparkshell', () => {
       if (shouldSkipForSpawnPermissions(result.error)) return;
 
       assert.equal(result.status, 0, result.stderr || result.stdout);
-      assert.match(result.stdout, /omx explore\s+DEPRECATED compatibility command; use normal repo inspection or omx sparkshell/);
       assert.match(result.stdout, /omx sparkshell <command> \[args\.\.\.\]/);
       assert.match(result.stdout, /omx sparkshell --tmux-pane <pane-id> \[--tail-lines <100-1000>\]/);
       assert.match(result.stdout, /explicit tmux-pane summarization/i);

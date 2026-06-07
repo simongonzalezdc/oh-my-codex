@@ -63,7 +63,6 @@ function detectOmxConfigArtifacts(config: string): {
   hasTuiSection: boolean;
   hasTopLevelKeys: boolean;
   hasFeatureFlags: boolean;
-  hasExploreRoutingEnv: boolean;
 } {
   const hasMcpServers = OMX_FIRST_PARTY_MCP_SERVER_NAMES.filter((name) =>
     new RegExp(`\\[mcp_servers\\.${name}\\]`).test(config),
@@ -94,15 +93,12 @@ function detectOmxConfigArtifacts(config: string): {
     /^\s*codex_hooks\s*=\s*true/m.test(config) ||
     /^\s*goals\s*=\s*true/m.test(config) ||
     /^\s*goal\s*=\s*true/m.test(config);
-  const hasExploreRoutingEnv = /^\s*USE_OMX_EXPLORE_CMD\s*=/m.test(config);
-
   return {
     hasMcpServers,
     hasAgentEntries,
     hasTuiSection,
     hasTopLevelKeys,
     hasFeatureFlags,
-    hasExploreRoutingEnv,
   };
 }
 

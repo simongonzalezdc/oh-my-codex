@@ -86,33 +86,6 @@ describe("generateOverlay", () => {
     assert.doesNotMatch(defaultOverlay, /\*\*Orchestration Mode:\*\* team/);
   });
 
-  it("adds deprecation guidance for explore routing by default and on explicit compatibility opt-in", async () => {
-    const previous = process.env.USE_OMX_EXPLORE_CMD;
-    try {
-      delete process.env.USE_OMX_EXPLORE_CMD;
-      const defaultOverlay = await generateOverlay(
-        tempDir,
-        "explore-routing-default",
-      );
-      assert.match(defaultOverlay, /\*\*Explore Command Deprecated:\*\*/);
-      assert.match(defaultOverlay, /MUST NOT be recommended/i);
-      assert.match(defaultOverlay, /normal Codex repository inspection/i);
-      assert.match(defaultOverlay, /Compatibility routing is not enabled/i);
-
-      process.env.USE_OMX_EXPLORE_CMD = "1";
-      const enabledOverlay = await generateOverlay(
-        tempDir,
-        "explore-routing-enabled",
-      );
-      assert.match(enabledOverlay, /compatibility routing is explicitly enabled/i);
-      assert.match(enabledOverlay, /still prefer the replacement path/i);
-    } finally {
-      if (typeof previous === "string")
-        process.env.USE_OMX_EXPLORE_CMD = previous;
-      else delete process.env.USE_OMX_EXPLORE_CMD;
-    }
-  });
-
   it("generates overlay with active modes", async () => {
     const sessionId = "test-session-2";
     const sessionDir = join(tempDir, ".omx", "state", "sessions", sessionId);

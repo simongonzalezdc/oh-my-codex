@@ -352,7 +352,6 @@ describe('run-test-files diagnostics', () => {
           "  assert.equal(process.env.OMXBOX_ACTIVE, undefined);",
           "  assert.equal(process.env.OMX_MADMAX_DETACHED_CONTEXT, undefined);",
           "  assert.equal(process.env.OMX_DEFAULT_STANDARD_MODEL, undefined);",
-          "  assert.equal(process.env.USE_OMX_EXPLORE_CMD, undefined);",
           "  assert.equal(process.env.CODEX_SESSION_ID, undefined);",
           "  assert.equal(process.env.CODEX_HOME, undefined);",
           "  assert.equal(process.env.SESSION_ID, undefined);",
@@ -372,7 +371,6 @@ describe('run-test-files diagnostics', () => {
         OMXBOX_ACTIVE: '1',
         OMX_MADMAX_DETACHED_CONTEXT: 'live-context',
         OMX_DEFAULT_STANDARD_MODEL: 'ambient-model',
-        USE_OMX_EXPLORE_CMD: '1',
         CODEX_SESSION_ID: 'live-codex-session',
         CODEX_HOME: '/tmp/live-codex-home',
         SESSION_ID: 'live-shell-session',
@@ -386,7 +384,7 @@ describe('run-test-files diagnostics', () => {
     }
   });
 
-  it('preserves explicit test-runner controls and explore harness override while scrubbing live runtime env', () => {
+  it('preserves explicit test-runner controls while scrubbing live runtime env', () => {
     const wd = mkdtempSync(join(tmpdir(), 'omx-run-test-files-'));
     try {
       const testsDir = join(wd, '__tests__');
@@ -397,7 +395,7 @@ describe('run-test-files diagnostics', () => {
           "import { test } from 'node:test';",
           "import assert from 'node:assert/strict';",
           "test('runner env allowlist is narrow', () => {",
-          "  assert.equal(process.env.OMX_EXPLORE_BIN, '/tmp/fake-explore');",
+          "  assert.equal(process.env.OMX_SPARKSHELL_BIN, '/tmp/fake-sparkshell');",
           "  assert.equal(process.env.OMX_NODE_TEST_CONCURRENCY, '1');",
           "  assert.equal(process.env.OMX_ROOT, undefined);",
           "  assert.equal(process.env.CODEX_HOME, undefined);",
@@ -407,7 +405,7 @@ describe('run-test-files diagnostics', () => {
       );
 
       const result = runCompiledRunner(wd, {
-        OMX_EXPLORE_BIN: '/tmp/fake-explore',
+        OMX_SPARKSHELL_BIN: '/tmp/fake-sparkshell',
         OMX_NODE_TEST_CONCURRENCY: '1',
         OMX_ROOT: '/tmp/live-omx-root',
         CODEX_HOME: '/tmp/live-codex-home',
@@ -432,7 +430,7 @@ describe('run-test-files diagnostics', () => {
           "test('runtime env is preserved', () => {",
           "  assert.equal(process.env.OMX_ROOT, '/tmp/live-omx-root');",
           "  assert.equal(process.env.OMX_SESSION_ID, 'live-omx-session');",
-          "  assert.equal(process.env.USE_OMX_EXPLORE_CMD, '1');",
+          "  assert.equal(process.env.OMX_DEFAULT_STANDARD_MODEL, 'ambient-model');",
           "  assert.equal(process.env.CODEX_HOME, '/tmp/live-codex-home');",
           "});",
           '',
@@ -443,7 +441,7 @@ describe('run-test-files diagnostics', () => {
         OMX_NODE_TEST_PRESERVE_RUNTIME_ENV: '1',
         OMX_ROOT: '/tmp/live-omx-root',
         OMX_SESSION_ID: 'live-omx-session',
-        USE_OMX_EXPLORE_CMD: '1',
+        OMX_DEFAULT_STANDARD_MODEL: 'ambient-model',
         CODEX_HOME: '/tmp/live-codex-home',
       });
 

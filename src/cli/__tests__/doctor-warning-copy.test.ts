@@ -15,11 +15,6 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-	withPackagedExploreHarnessHidden,
-	withPackagedExploreHarnessLock,
-} from "./packaged-explore-harness-lock.js";
-import {
-	checkExploreHarness,
 	checkNativeHookDistSmoke,
 	classifyPostCompactHookStdout,
 } from "../doctor.js";
@@ -155,15 +150,6 @@ function buildHooksJsonWithPostCompactCommand(
 }
 
 describe("omx doctor onboarding warning copy", () => {
-	it("warns that the built-in explore harness is not ready on Windows", () => {
-		const check = checkExploreHarness("win32", {} as NodeJS.ProcessEnv);
-
-		assert.equal(check.name, "Explore Harness");
-		assert.equal(check.status, "warn");
-		assert.match(check.message, /not ready on Windows/i);
-		assert.match(check.message, /OMX_EXPLORE_BIN/);
-	});
-
 	it("treats user-managed MCP servers as preserved under CLI-first defaults", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-doctor-copy-"));
 		try {
@@ -573,154 +559,6 @@ enabled = true
 		}
 	});
 
-	it("warns when explore harness sources are packaged but cargo is unavailable", async () => {
-		const wd = await mkdtemp(join(tmpdir(), "omx-doctor-explore-copy-"));
-		try {
-			await withPackagedExploreHarnessHidden(async () => {
-				const home = join(wd, "home");
-				const codexDir = join(home, ".codex");
-				const fakeBin = join(wd, "bin");
-				await mkdir(codexDir, { recursive: true });
-				await mkdir(fakeBin, { recursive: true });
-				await writeFile(
-					join(fakeBin, "codex"),
-					'#!/bin/sh\necho "codex test"\n',
-				);
-				spawnSync("chmod", ["+x", join(fakeBin, "codex")], {
-					encoding: "utf-8",
-				});
-
-				const res = runOmx(wd, ["doctor"], {
-					HOME: home,
-					CODEX_HOME: join(home, ".codex"),
-					PATH: fakeBin,
-					OMX_EXPLORE_BIN: "",
-				});
-				if (shouldSkipForSpawnPermissions(res.error)) return;
-				assert.equal(res.status, 0, res.stderr || res.stdout);
-				assert.match(
-					res.stdout,
-					/Explore Harness: (Rust harness sources are packaged, but no compatible packaged prebuilt or cargo was found \(install Rust or set OMX_EXPLORE_BIN for omx explore\)|not ready \(no packaged binary, OMX_EXPLORE_BIN, or cargo toolchain\))/,
-				);
-			});
-		} finally {
-			await rm(wd, { recursive: true, force: true });
-		}
-	});
-
-	it("passes explore harness check when a packaged native binary is present even without cargo", async () => {
-		await withPackagedExploreHarnessLock(async () => {
-			const wd = await mkdtemp(join(tmpdir(), "omx-doctor-explore-binary-"));
-			try {
-				const home = join(wd, "home");
-				const codexDir = join(home, ".codex");
-				const fakeBin = join(wd, "bin");
-				const packageBinDir = join(process.cwd(), "bin");
-				const packagedBinary = join(
-					packageBinDir,
-					process.platform === "win32"
-						? "omx-explore-harness.exe"
-						: "omx-explore-harness",
-				);
-				const packagedMeta = join(
-					packageBinDir,
-					"omx-explore-harness.meta.json",
-				);
-				const hadExistingBinary = existsSync(packagedBinary);
-				const hadExistingMeta = existsSync(packagedMeta);
-
-				await mkdir(codexDir, { recursive: true });
-				await mkdir(fakeBin, { recursive: true });
-				await writeFile(
-					join(fakeBin, "codex"),
-					'#!/bin/sh\necho "codex test"\n',
-				);
-				spawnSync("chmod", ["+x", join(fakeBin, "codex")], {
-					encoding: "utf-8",
-				});
-				const fsPromises = await import("node:fs/promises");
-				const originalBinary = hadExistingBinary
-					? await fsPromises.readFile(packagedBinary)
-					: null;
-				const originalMeta = hadExistingMeta
-					? await fsPromises.readFile(packagedMeta, "utf-8")
-					: null;
-				await mkdir(packageBinDir, { recursive: true });
-				await writeFile(packagedBinary, '#!/bin/sh\necho "stub harness"\n');
-				await writeFile(
-					packagedMeta,
-					JSON.stringify({
-						binaryName:
-							process.platform === "win32"
-								? "omx-explore-harness.exe"
-								: "omx-explore-harness",
-						platform: process.platform,
-						arch: process.arch,
-					}),
-				);
-				spawnSync("chmod", ["+x", packagedBinary], { encoding: "utf-8" });
-
-				try {
-					const res = runOmx(wd, ["doctor"], {
-						HOME: home,
-						CODEX_HOME: join(home, ".codex"),
-						PATH: fakeBin,
-						OMX_EXPLORE_BIN: "",
-					});
-					if (shouldSkipForSpawnPermissions(res.error)) return;
-					assert.equal(res.status, 0, res.stderr || res.stdout);
-					assert.match(
-						res.stdout,
-						/Explore Harness: ready \(packaged native binary:/,
-					);
-				} finally {
-					if (originalBinary) {
-						await writeFile(packagedBinary, originalBinary);
-						spawnSync("chmod", ["+x", packagedBinary], { encoding: "utf-8" });
-					} else {
-						await rm(packagedBinary, { force: true });
-					}
-					if (originalMeta !== null) {
-						await writeFile(packagedMeta, originalMeta);
-					} else {
-						await rm(packagedMeta, { force: true });
-					}
-				}
-			} finally {
-				await rm(wd, { recursive: true, force: true });
-			}
-		});
-	});
-
-	it("passes when deprecated explore routing is explicitly disabled by environment/config", async () => {
-		const wd = await mkdtemp(join(tmpdir(), "omx-doctor-explore-routing-"));
-		try {
-			const home = join(wd, "home");
-			const codexDir = join(home, ".codex");
-			await mkdir(codexDir, { recursive: true });
-			await writeFile(
-				join(codexDir, "config.toml"),
-				`
-[shell_environment_policy.set]
-USE_OMX_EXPLORE_CMD = "off"
-`.trimStart(),
-			);
-
-			const res = runOmx(wd, ["doctor"], {
-				HOME: home,
-				CODEX_HOME: join(home, ".codex"),
-				USE_OMX_EXPLORE_CMD: "off",
-			});
-			if (shouldSkipForSpawnPermissions(res.error)) return;
-			assert.equal(res.status, 0, res.stderr || res.stdout);
-			assert.match(
-				res.stdout,
-				/Explore routing: deprecated compatibility routing disabled by environment override \(recommended\)/,
-			);
-		} finally {
-			await rm(wd, { recursive: true, force: true });
-		}
-	});
 
 	it("reports when Lore commit guard is explicitly disabled in config.toml", async () => {
 		const wd = await mkdtemp(join(tmpdir(), "omx-doctor-lore-commit-guard-"));

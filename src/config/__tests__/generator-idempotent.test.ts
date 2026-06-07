@@ -97,13 +97,8 @@ function assertSingleOmxBlock(
     1,
     "[shell_environment_policy.set] should appear once",
   );
-  assert.equal(
-    count(toml, /^USE_OMX_EXPLORE_CMD = "0"$/gm),
-    1,
-    "USE_OMX_EXPLORE_CMD should appear once",
-  );
-
 }
+
 
 function assertFirstPartyMcpBlocks(toml: string): void {
   const parsed = TOML.parse(toml) as {
@@ -678,27 +673,17 @@ describe("config generator idempotency (#384)", () => {
     assert.doesNotMatch(toml, /^\[tui\]$/m);
     assert.doesNotMatch(toml, /^\[mcp_servers\.omx_state\]$/m);
     assert.match(toml, /^\[shell_environment_policy\.set\]$/m);
-    assert.match(toml, /^USE_OMX_EXPLORE_CMD = "0"$/m);
   });
 
-  it('seeds USE_OMX_EXPLORE_CMD=0 into generated config by default', () => {
-    const toml = buildMergedConfig('', '/tmp/omx');
-
-    assert.doesNotMatch(toml, /^\[env\]$/m);
-    assert.match(toml, /^\[shell_environment_policy\.set\]$/m);
-    assert.match(toml, /^USE_OMX_EXPLORE_CMD = "0"$/m);
-  });
-
-  it('migrates existing [env] keys and explicit explore routing opt-outs', () => {
+  it('migrates existing [env] keys', () => {
     const toml = buildMergedConfig(
-      ['[env]', 'FOO = "bar"', 'USE_OMX_EXPLORE_CMD = "0"', ''].join('\n'),
+      ['[env]', 'FOO = "bar"', ''].join('\n'),
       '/tmp/omx',
     );
 
     assert.doesNotMatch(toml, /^\[env\]$/m);
     assert.match(toml, /^\[shell_environment_policy\.set\]$/m);
     assert.match(toml, /^FOO = "bar"$/m);
-    assert.match(toml, /^USE_OMX_EXPLORE_CMD = "0"$/m);
   });
 
   it("migrates multiline [env] values without truncating TOML entries", () => {
@@ -724,7 +709,6 @@ describe("config generator idempotency (#384)", () => {
       /FOO = """first line\n  second line\nthird line"""/,
     );
     assert.match(toml, /BAR = \[\n  "one",\n  "two",\n\]/);
-    assert.match(toml, /^USE_OMX_EXPLORE_CMD = "0"$/m);
     assert.doesNotThrow(() => TOML.parse(toml));
   });
 
