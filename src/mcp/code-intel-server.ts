@@ -324,7 +324,7 @@ export function buildCodeIntelServerTools() {
   return [
     {
       name: 'lsp_diagnostics',
-      description: 'Get diagnostics (errors, warnings) for a file. Uses tsc --noEmit for TypeScript projects.',
+      description: 'Get diagnostics (errors, warnings) for a single file using tsc --noEmit. Returns an array of diagnostic objects with file, line, severity, code, and message. Use when checking a specific source file for type errors. Pass file from the file path to check.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -336,7 +336,7 @@ export function buildCodeIntelServerTools() {
     },
     {
       name: 'lsp_diagnostics_directory',
-      description: 'Run project-level diagnostics on a directory using tsc --noEmit. Returns all errors across the project.',
+      description: 'Run project-level diagnostics on a directory using tsc --noEmit. Returns all errors and warnings grouped by file across the project. Use when checking the entire project for type errors. Pass directory from the project root to check.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -348,7 +348,7 @@ export function buildCodeIntelServerTools() {
     },
     {
       name: 'lsp_document_symbols',
-      description: 'Get a hierarchical outline of all symbols in a file (functions, classes, variables, etc.).',
+      description: 'Get a hierarchical outline of all symbols in a source file (functions, classes, interfaces, variables, etc.). Returns an array of symbol objects with name, kind, line, and character. Use when understanding the structure of a file. Pass file from the source file path to analyze.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -359,7 +359,7 @@ export function buildCodeIntelServerTools() {
     },
     {
       name: 'lsp_workspace_symbols',
-      description: 'Search for symbols (functions, classes, etc.) across the workspace by name.',
+      description: 'Search for symbols (functions, classes, types, etc.) across the workspace by name. Returns an array of matching symbol objects with file, name, kind, and line. Use when finding where a symbol is defined across the codebase. Pass query from the symbol name to search and file as any workspace file to locate the project root.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -371,7 +371,7 @@ export function buildCodeIntelServerTools() {
     },
     {
       name: 'lsp_hover',
-      description: 'Get type information and documentation at a specific position in a file (regex-based approximation).',
+      description: 'Get type information and documentation at a specific position in a file using regex-based approximation. Returns the word at the position, its local definition if found, and the line content. Use when inspecting a symbol type at a cursor position. Pass file, line, and character from the source location to inspect.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -384,7 +384,7 @@ export function buildCodeIntelServerTools() {
     },
     {
       name: 'lsp_find_references',
-      description: 'Find all references to a symbol across the codebase using grep-based search.',
+      description: 'Find all references to a symbol across the codebase using grep-based search. Returns an array of reference objects with file, line, and content. Use when finding all usages of a function, variable, or type. Pass file, line, and character from the symbol definition location.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -398,7 +398,7 @@ export function buildCodeIntelServerTools() {
     },
     {
       name: 'lsp_servers',
-      description: 'List available diagnostic backends and their installation status.',
+      description: 'List available diagnostic backends and their installation status. Returns a map of backend names to availability, version, and install instructions. Use when checking which code-intelligence tools are installed. Takes no parameters.',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -406,7 +406,7 @@ export function buildCodeIntelServerTools() {
     },
     {
       name: 'ast_grep_search',
-      description: 'Search for code patterns using AST matching. Uses meta-variables: $NAME (single node), $$$ARGS (multiple nodes). Example: "function $NAME($$$ARGS)" finds all function declarations.',
+      description: 'Search for code patterns using AST matching with meta-variables. Returns an array of match objects with file, range, and captured nodes. Use when finding structural code patterns that grep cannot express. Pass pattern with $NAME (single node) and $$$ARGS (multiple nodes) meta-variables, plus language from the target file language.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -424,7 +424,7 @@ export function buildCodeIntelServerTools() {
     },
     {
       name: 'ast_grep_replace',
-      description: 'Replace code patterns using AST matching. Use meta-variables in both pattern and replacement. IMPORTANT: dryRun=true (default) only previews changes. Set dryRun=false to apply.',
+      description: 'Replace code patterns using AST matching with meta-variables in both pattern and replacement. Returns a list of changed files and matches, or a preview when dryRun is true. Use when performing structural code refactoring. Pass pattern and replacement with matching meta-variables, plus language from the target file language; set dryRun=false to apply changes.',
       inputSchema: {
         type: 'object',
         properties: {

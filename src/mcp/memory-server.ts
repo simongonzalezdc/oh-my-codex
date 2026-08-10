@@ -43,7 +43,7 @@ export function buildMemoryServerTools() {
     // Project Memory tools
     {
       name: 'project_memory_read',
-      description: 'Read project memory. Can read full memory or a specific section.',
+      description: 'Read project memory from .omx/project-memory.json. Returns the full memory object or a specific section (techStack, build, conventions, structure, notes, directives). Use when retrieving accumulated project knowledge. Pass section to read a single field, or omit for the full object.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -54,7 +54,7 @@ export function buildMemoryServerTools() {
     },
     {
       name: 'project_memory_write',
-      description: 'Write/update project memory. Can replace entirely or merge.',
+      description: 'Write or update project memory in .omx/project-memory.json. Returns a success confirmation object. Use when persisting learned project knowledge (tech stack, build commands, conventions). Pass memory as the object to write and merge=true to combine with existing data.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -67,7 +67,7 @@ export function buildMemoryServerTools() {
     },
     {
       name: 'project_memory_add_note',
-      description: 'Add a categorized note to project memory.',
+      description: 'Add a categorized note to project memory. Returns a success object with the updated note count. Use when recording a specific learning or observation (build, test, deploy, env, architecture). Pass category and content from the learning to record.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -80,7 +80,7 @@ export function buildMemoryServerTools() {
     },
     {
       name: 'project_memory_add_directive',
-      description: 'Add a persistent directive to project memory.',
+      description: 'Add a persistent high-priority directive to project memory. Returns a success object with the updated directive count. Use when recording a standing instruction the agent must follow across sessions. Pass directive text from the instruction and priority (high or normal).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -95,7 +95,7 @@ export function buildMemoryServerTools() {
     // Notepad tools
     {
       name: 'notepad_read',
-      description: 'Read notepad content. Can read full or a specific section (priority, working, manual).',
+      description: 'Read notepad content from .omx/notepad.md. Returns the full notepad text or a specific section (priority, working, manual). Use when retrieving the agent current priority context, working memory, or manual notes. Pass section to read one part, or omit for the full content.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -106,7 +106,7 @@ export function buildMemoryServerTools() {
     },
     {
       name: 'notepad_write_priority',
-      description: 'Write to Priority Context section. Replaces existing. Keep under 500 chars.',
+      description: 'Write to the Priority Context section of the notepad, replacing any existing content. Returns a success confirmation object. Use when setting the top-priority context the agent should focus on. Pass content (truncated to 500 chars) from the priority context to set.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -118,7 +118,7 @@ export function buildMemoryServerTools() {
     },
     {
       name: 'notepad_write_working',
-      description: 'Add timestamped entry to Working Memory section.',
+      description: 'Add a timestamped entry to the Working Memory section of the notepad. Returns a success confirmation object. Use when recording transient progress notes during a task. Pass content from the working note to append.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -130,7 +130,7 @@ export function buildMemoryServerTools() {
     },
     {
       name: 'notepad_write_manual',
-      description: 'Add entry to Manual section. Never auto-pruned.',
+      description: 'Add a persistent entry to the Manual section of the notepad that is never auto-pruned. Returns a success confirmation object. Use when recording permanent reference notes. Pass content from the manual note to append.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -142,7 +142,7 @@ export function buildMemoryServerTools() {
     },
     {
       name: 'notepad_prune',
-      description: 'Prune Working Memory entries older than N days (default: 7).',
+      description: 'Prune Working Memory entries older than a configurable number of days. Returns a summary with the count of pruned and remaining entries. Use when cleaning up stale working notes. Pass daysOld to set the age threshold (default 7).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -153,7 +153,7 @@ export function buildMemoryServerTools() {
     },
     {
       name: 'notepad_stats',
-      description: 'Get statistics about the notepad (size, entry count, oldest entry).',
+      description: 'Get statistics about the notepad file. Returns file size, per-section entry counts, and the oldest and newest working-memory timestamps. Use when auditing notepad health or checking size. Takes no parameters beyond optional workingDirectory.',
       inputSchema: {
         type: 'object',
         properties: {

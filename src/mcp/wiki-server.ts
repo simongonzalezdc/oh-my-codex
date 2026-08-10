@@ -61,7 +61,7 @@ export function buildWikiServerTools() {
   return [
     {
       name: 'wiki_ingest',
-      description: 'Process knowledge into wiki pages. Creates new pages or merges into existing ones.',
+      description: 'Process knowledge into structured wiki pages, creating new pages or merging into existing ones. Returns an ingest result with created and updated page slugs. Use when capturing learned knowledge for future reference. Pass title, content, tags, and category from the knowledge to store.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -78,7 +78,7 @@ export function buildWikiServerTools() {
     },
     {
       name: 'wiki_query',
-      description: 'Search wiki pages by keywords and tags. Returns raw matches for synthesis.',
+      description: 'Search wiki pages by keywords and tags. Returns an array of matching page objects with relevance scores. Use when retrieving relevant prior knowledge for a task. Pass query from the search terms and optionally tags or category to narrow results.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -93,7 +93,7 @@ export function buildWikiServerTools() {
     },
     {
       name: 'wiki_lint',
-      description: 'Run health checks on the wiki.',
+      description: 'Run health checks on the wiki. Returns a lint report with issues such as broken links, orphaned pages, or stale entries. Use when auditing wiki quality. Pass workingDirectory to scope the check.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -103,7 +103,7 @@ export function buildWikiServerTools() {
     },
     {
       name: 'wiki_add',
-      description: 'Quick-add a single wiki page. Rejects overwrites; use wiki_ingest to merge.',
+      description: 'Quick-add a single new wiki page. Returns a created-page result with the page slug. Use when adding a distinct page that does not yet exist; rejects overwrites — use wiki_ingest to merge instead. Pass title and content from the page to create.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -118,7 +118,7 @@ export function buildWikiServerTools() {
     },
     {
       name: 'wiki_list',
-      description: 'List wiki pages and return the index when present.',
+      description: 'List all wiki pages and return the index metadata when present. Returns an object with a pages array and the index object. Use when browsing available wiki content. Pass workingDirectory to scope the listing.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -128,7 +128,7 @@ export function buildWikiServerTools() {
     },
     {
       name: 'wiki_read',
-      description: 'Read a specific wiki page.',
+      description: 'Read a specific wiki page by name or slug. Returns the full page object with title, content, tags, category, and metadata. Use when retrieving the full content of a known wiki page. Pass page from the page name or slug obtained via wiki_list or wiki_query.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -140,7 +140,7 @@ export function buildWikiServerTools() {
     },
     {
       name: 'wiki_delete',
-      description: 'Delete a wiki page and update the index.',
+      description: 'Delete a wiki page and update the index. Returns a confirmation object with the deleted page slug. Use when removing outdated or incorrect wiki content. Pass page from the page name or slug to delete.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -152,7 +152,7 @@ export function buildWikiServerTools() {
     },
     {
       name: 'wiki_refresh',
-      description: 'Rebuild the wiki index and refresh derived metadata surfaces.',
+      description: 'Rebuild the wiki index and refresh derived metadata surfaces. Returns a refreshed-result object with the updated page list and index. Use when the index is stale after manual file changes. Pass workingDirectory to scope the refresh.',
       inputSchema: {
         type: 'object',
         properties: {

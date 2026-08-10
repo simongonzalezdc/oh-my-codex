@@ -38,12 +38,12 @@ export function buildHermesServerTools() {
   return [
     {
       name: "hermes_list_sessions",
-      description: "List known OMX session state for a bounded worktree without reading terminal UI.",
+      description: "List known OMX session state for a bounded worktree without reading terminal UI. Returns an array of session objects with IDs and mode status. Use when discovering active OMX sessions from a coordinator. Pass workingDirectory from the project root.",
       inputSchema: { type: "object", properties: { workingDirectory } },
     },
     {
       name: "hermes_start_session",
-      description: "Start a new isolated OMX tmux session in disposable worktree mode for one bounded prompt.",
+      description: "Start a new isolated OMX tmux session in disposable worktree mode for one bounded prompt. Returns a session-start result with the new session ID. Use when launching a detached agent worker for a specific task. Pass workingDirectory from the project root, prompt from the task description, and allow_mutation=true for write operations.",
       inputSchema: {
         type: "object",
         properties: {
@@ -57,7 +57,7 @@ export function buildHermesServerTools() {
     },
     {
       name: "hermes_send_prompt",
-      description: "Queue one explicit prompt for a selected OMX exec session via the audited follow-up queue.",
+      description: "Queue one explicit prompt for a selected OMX exec session via the audited follow-up queue. Returns a queue-acceptance confirmation. Use when sending a follow-up instruction to a running session. Pass session_id from hermes_list_sessions, prompt from the instruction, and allow_mutation=true for write operations.",
       inputSchema: {
         type: "object",
         properties: {
@@ -72,22 +72,22 @@ export function buildHermesServerTools() {
     },
     {
       name: "hermes_read_status",
-      description: "Read selected session/mode status JSON from OMX state files.",
+      description: "Read selected session or mode status JSON from OMX state files. Returns the session status object with active flag, phase, and progress. Use when checking a session current state without touching the terminal. Pass session_id from hermes_list_sessions.",
       inputSchema: { type: "object", properties: { workingDirectory, session_id: sessionId } },
     },
     {
       name: "hermes_read_tail",
-      description: "Read the bounded OMX session history log tail, not tmux scrollback.",
+      description: "Read the bounded OMX session history log tail from structured log files, not tmux scrollback. Returns recent log entries with timestamps. Use when inspecting recent session output without terminal access. Pass workingDirectory from the project root and optionally lines to limit entries.",
       inputSchema: { type: "object", properties: { workingDirectory, lines: { type: "number" } } },
     },
     {
       name: "hermes_list_question_events",
-      description: "Read structured question lifecycle events for coordinator bridge correlation.",
+      description: "Read structured question lifecycle events for coordinator bridge correlation. Returns an array of question-event objects with question IDs and lifecycle transitions. Use when tracking open questions across sessions. Pass workingDirectory from the project root and optionally limit to cap entries.",
       inputSchema: { type: "object", properties: { workingDirectory, limit: { type: "number" } } },
     },
     {
       name: "hermes_list_questions",
-      description: "List bounded structured question records without reading terminal UI.",
+      description: "List bounded structured question records without reading terminal UI. Returns an array of question objects with IDs, status, and prompt text. Use when discovering pending questions that need answers. Pass session_id from hermes_list_sessions and optionally status to filter.",
       inputSchema: {
         type: "object",
         properties: {
@@ -100,7 +100,7 @@ export function buildHermesServerTools() {
     },
     {
       name: "hermes_submit_question_answer",
-      description: "Submit a bounded structured answer by question id; never proxies arbitrary terminal input.",
+      description: "Submit a bounded structured answer by question ID; never proxies arbitrary terminal input. Returns an acceptance confirmation for the submitted answer. Use when answering a structured question raised by an OMX session. Pass question_id from hermes_list_questions, the answer object, and allow_mutation=true.",
       inputSchema: {
         type: "object",
         properties: {
@@ -116,12 +116,12 @@ export function buildHermesServerTools() {
     },
     {
       name: "hermes_list_artifacts",
-      description: "List known safe result artifact files under .omx plans/specs/goals/context/reports.",
+      description: "List known safe result artifact files under .omx plans, specs, goals, context, and reports directories. Returns an array of artifact path strings. Use when discovering what deliverables a session has produced. Pass workingDirectory from the project root and optionally limit to cap entries.",
       inputSchema: { type: "object", properties: { workingDirectory, limit: { type: "number" } } },
     },
     {
       name: "hermes_read_artifact",
-      description: "Read one safe .omx result artifact by relative path with byte truncation.",
+      description: "Read one safe .omx result artifact by relative path with byte truncation. Returns the artifact text content, truncated to a safe size. Use when reading a specific deliverable produced by a session. Pass path from the artifact path obtained via hermes_list_artifacts and optionally max_bytes to limit size.",
       inputSchema: {
         type: "object",
         properties: { workingDirectory, path: { type: "string" }, max_bytes: { type: "number" } },
@@ -130,7 +130,7 @@ export function buildHermesServerTools() {
     },
     {
       name: "hermes_report_status",
-      description: "Write a small final/blocker status report for Hermes without owning merge policy.",
+      description: "Write a small final or blocker status report for Hermes coordination without owning merge policy. Returns a report-acceptance confirmation. Use when signaling that a session has completed, is blocked, or has failed. Pass status from the outcome enum (running, blocked, failed, complete), summary text, and allow_mutation=true.",
       inputSchema: {
         type: "object",
         properties: {

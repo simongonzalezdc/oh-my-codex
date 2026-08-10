@@ -210,7 +210,7 @@ export function buildTraceServerTools() {
   return [
     {
       name: 'trace_timeline',
-      description: 'Show chronological agent flow trace timeline. Displays turns, mode transitions, and agent activity in time order.',
+      description: 'Show a chronological agent flow trace timeline. Returns an array of timeline entries (turns, mode transitions) sorted by timestamp with input/output previews. Use when debugging agent behavior or understanding execution order. Pass filter to scope to turns or modes, and last to limit entries.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -226,7 +226,7 @@ export function buildTraceServerTools() {
     },
     {
       name: 'trace_summary',
-      description: 'Show aggregate statistics for agent flow trace. Includes turn counts, mode usage, token consumption, and timing.',
+      description: 'Show aggregate statistics for the agent flow trace. Returns turn counts by type, mode usage breakdown, token consumption from metrics, and timing duration. Use when getting a high-level overview of agent activity. Pass workingDirectory to scope the summary.',
       inputSchema: {
         type: 'object',
         properties: {

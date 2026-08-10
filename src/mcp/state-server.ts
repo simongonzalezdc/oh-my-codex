@@ -47,7 +47,7 @@ export function buildStateServerTools() {
 		{
 			name: "state_read",
 			description:
-				"Read state for a specific mode. Returns JSON state data or indicates no state exists.",
+				"Read persisted state for a specific mode. Returns the mode's JSON state object or an empty result indicating no state exists. Use when checking the current state of an OMX workflow mode (autopilot, team, ralph, etc.). Pass mode from the set of supported modes and optionally session_id to scope the read.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -71,7 +71,7 @@ export function buildStateServerTools() {
 		{
 			name: "state_write",
 			description:
-				"Write/update state for a specific mode. Creates directories if needed.",
+				"Write or update persisted state for a specific mode. Returns a success confirmation object. Use when recording workflow progress, phase transitions, or outcomes for an OMX mode. Pass mode from the set of supported modes along with the state fields to persist.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -109,7 +109,7 @@ export function buildStateServerTools() {
 		},
 		{
 			name: "state_clear",
-			description: "Clear/delete state for a specific mode.",
+			description: "Clear or delete persisted state for a specific mode. Returns a success confirmation object. Use when resetting or cleaning up a finished OMX workflow mode. Pass mode from the set of supported modes; optionally pass all_sessions to clear across scopes.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -129,7 +129,7 @@ export function buildStateServerTools() {
 		},
 		{
 			name: "state_list_active",
-			description: "List all currently active modes.",
+			description: "List all currently active OMX workflow modes. Returns an array of active mode names with their state summaries. Use when checking which workflows are currently running. Pass workingDirectory to scope the listing.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -143,7 +143,7 @@ export function buildStateServerTools() {
 		},
 		{
 			name: "state_get_status",
-			description: "Get detailed status for a specific mode or all modes.",
+			description: "Get detailed status for a specific mode or all modes. Returns a status object with active flag, phase, iteration count, and timestamps. Use when inspecting workflow progress or diagnosing a stuck mode. Pass mode to scope to one mode, or omit to get all modes.",
 			inputSchema: {
 				type: "object",
 				properties: {
